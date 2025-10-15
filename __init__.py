@@ -230,5 +230,4 @@ def download_model(model_name, model_path):
 
 def load_model(model_name, model_path, **kwargs):
     from .zoo import GeminiRemoteModel
-
     return GeminiRemoteModel(config=kwargs)

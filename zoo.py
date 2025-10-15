@@ -12,7 +12,6 @@ class GeminiRemoteModel(Model):
         self.model = config.get("model", "gemini-2.5-flash")
         self.max_tokens = int(config.get("max_tokens", 2048))
         self.prompt = config.get("prompt", "What is in this image?")
-        self.prompt_echo_field = config.get("prompt_echo_field", None)
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for GeminiRemoteModel")
@@ -34,6 +33,18 @@ class GeminiRemoteModel(Model):
     @needs_fields.setter
     def needs_fields(self, fields):
         self._needs_fields = fields or {}
+
+    def _get_field(self):
+        """Returns the prompt field name from needs_fields, if any."""
+        if isinstance(self.needs_fields, dict):
+            if "prompt_field" in self.needs_fields:
+                return self.needs_fields["prompt_field"]
+            if self.needs_fields:
+                try:
+                    return next(iter(self.needs_fields.values()))
+                except Exception:
+                    return None
+        return None
 
     def _encode_image(self, image_path):
         with open(image_path, "rb") as f:
@@ -77,10 +88,7 @@ class GeminiRemoteModel(Model):
             return str(data)
 
     def _resolve_prompt(self, sample):
-        field_name = None
-        if isinstance(self.needs_fields, dict):
-            field_name = self.needs_fields.get("prompt_field") or next(iter(self.needs_fields.values()), None)
-
+        field_name = self._get_field()
         if sample is not None and field_name:
             try:
                 value = sample.get_field(field_name)
@@ -88,7 +96,6 @@ class GeminiRemoteModel(Model):
                 value = None
             if value is not None and str(value).strip():
                 return str(value)
-
         return self.prompt
 
     def predict(self, image, sample=None):
@@ -133,12 +140,5 @@ class GeminiRemoteModel(Model):
             {"text": prompt},
             {"inline_data": {"mime_type": mime_type, "data": b64}},
         ]
-        result = self._post(parts)
-        if self.prompt_echo_field and sample is not None:
-            try:
-                setattr(sample, self.prompt_echo_field, prompt)
-                sample.save()
-            except Exception:
-                pass
-        return result
+        return self._post(parts)
 
