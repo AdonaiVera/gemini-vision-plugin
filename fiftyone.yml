@@ -1,0 +1,8 @@
+fiftyone:
+  version: ">=0.22.0"
+name: "@adonaivera/gemini_vision"
+version: "1.0.0"
+description: "Use Google Gemini Vision to chat with images in your dataset!"
+url: "https://ai.google.dev/gemini-api"
+operators:
+  - query_gemini_vision
