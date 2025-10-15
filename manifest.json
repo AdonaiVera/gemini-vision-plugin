@@ -1,51 +1,14 @@
 {
-  "base_name": "google/Gemini-Vision",
-  "version": "1.0.0",
-  "type": "inference",
-  "description": "Gemini Vision remote model for visual question answering via Google Gemini API",
-  "tags": ["gemini", "vision", "vqa", "multimodal"],
-  "license": "Apache-2.0",
-  "url": "https://ai.google.dev/gemini-api",
-  "default_deployments": [
+  "name": "AdonaiVera/gemini-vision-plugin",
+  "url": "https://github.com/AdonaiVera/gemini-vision-plugin",
+  "models": [
     {
-      "name": "default",
-      "config": {
-        "model": "gemini-2.5-flash",
-        "max_tokens": 2048
-      }
+      "base_name": "google/Gemini-Vision",
+      "author": "Google",
+      "license": "Apache-2.0",
+      "description": "Gemini Vision remote model for VQA via Google Gemini API",
+      "tags": ["gemini", "vision", "vqa", "multimodal"]
     }
-  ],
-  "parameters": {
-    "prompt": {
-      "type": "string",
-      "default": "What is in this image?",
-      "description": "Question/prompt to ask Gemini about each image"
-    },
-    "prompt_field": {
-      "type": "string",
-      "default": null,
-      "description": "Optional dataset field containing per-image prompts"
-    },
-    "label_field": {
-      "type": "string",
-      "default": "gemini_output",
-      "description": "Output field to store Gemini text responses"
-    },
-    "image_field": {
-      "type": "string",
-      "default": "filepath",
-      "description": "Dataset field that contains the image path"
-    },
-    "model": {
-      "type": "string",
-      "default": "gemini-2.5-flash",
-      "description": "Gemini model to use"
-    },
-    "max_tokens": {
-      "type": "number",
-      "default": 2048,
-      "description": "Maximum output tokens"
-    }
-  }
+  ]
 }
 
