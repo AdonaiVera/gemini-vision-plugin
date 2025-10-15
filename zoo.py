@@ -17,6 +17,12 @@ class GeminiRemoteModel(Model):
         self.api_key = api_key
         self.config = config
 
+    @property
+    def media_type(self):
+        """Returns the media type for the model."""
+        # TODO: add support for other media types (VIDEO, AUDIO, etc.)
+        return "image"
+
     def _encode_image(self, image_path):
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
