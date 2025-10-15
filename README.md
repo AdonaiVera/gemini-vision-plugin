@@ -1,5 +1,4 @@
 ## Gemini Vision Plugin
-# TODO: add gif working
 
 ### Plugin Overview
 
@@ -67,27 +66,39 @@ You can also use this repo as a remote model source and load a Gemini model via 
 ### Register and load
 
 ```python
-    import fiftyone as fo
-    import fiftyone.zoo as foz
+import fiftyone as fo
+import fiftyone.zoo as foz
+import os
 
-    # Register the remote model source
-    foz.register_zoo_model_source(
-        "https://github.com/AdonaiVera/gemini-vision-plugin",
-        overwrite=True,
-    )
+os.environ["GEMINI_API_KEY"] = "<YOUR_KEY>"
 
-    # Load the model (Gemini remote HTTP model)
-    model = foz.load_zoo_model("google/Gemini-Vision", model="gemini-2.5-flash", max_tokens=2048)
+# Register the remote model source
+foz.register_zoo_model_source(
+    "https://github.com/AdonaiVera/gemini-vision-plugin",
+    overwrite=True,
+)
 
-    # Apply to a dataset (supports prompt_field or a static prompt)
-    raw_output_field = "gemini_output"
-    classification_field = None  
-    dataset.apply_model(
-        model,
-        prompt_field="dynamic_prompt",
-        label_field=raw_output_field,
-        image_field="filepath",
-    )
+# Load the model (Gemini remote HTTP model)
+model = foz.load_zoo_model(
+    "google/Gemini-Vision",
+    model="gemini-2.5-flash",
+    max_tokens=2048,
+    max_workers=16,
+)
+
+
+# Load a small sample dataset
+dataset = foz.load_zoo_dataset("quickstart", split="validation", max_samples=10)
+
+# Apply to a dataset (supports prompt_field or a static prompt)
+raw_output_field = "gemini_output"
+classification_field = None
+dataset.apply_model(
+    model,
+    prompt_field="dynamic_prompt",
+    label_field=raw_output_field,
+    image_field="filepath",
+)
 ```
 
 See FiftyOne docs on remote models for more details: [Remote models](https://docs.voxel51.com/model_zoo/remote.html).
