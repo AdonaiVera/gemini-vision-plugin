@@ -4,15 +4,9 @@ import requests
 
 import fiftyone as fo
 import fiftyone.core.utils as fou
+from fiftyone.core.models import Model
 
-def download_model(base_name, model_name=None, overwrite=False):
-    return True
-
-
-def load_model(base_name, model_name=None, **kwargs):
-    return GeminiRemoteModel(config=kwargs)
-
-class GeminiRemoteModel:
+class GeminiRemoteModel(Model):
     def __init__(self, config=None):
         config = config or {}
         self.model = config.get("model", "gemini-2.5-flash")
@@ -21,6 +15,7 @@ class GeminiRemoteModel:
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for GeminiRemoteModel")
         self.api_key = api_key
+        self.config = config
 
     def _encode_image(self, image_path):
         with open(image_path, "rb") as f:
