@@ -4,6 +4,7 @@
   "models": [
     {
       "base_name": "google/Gemini-Vision",
+      "base_filename": "gemini_remote.marker",
       "author": "Google",
       "license": "Apache-2.0",
       "description": "Gemini Vision remote model for VQA via Google Gemini API",
