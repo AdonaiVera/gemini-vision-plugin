@@ -2,10 +2,6 @@ import os
 import base64
 import requests
 import io
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import fiftyone as fo
-import fiftyone.core.utils as fou
 from fiftyone.core.models import Model
 from PIL import Image
 import numpy as np
@@ -16,13 +12,13 @@ class GeminiRemoteModel(Model):
         self.model = config.get("model", "gemini-2.5-flash")
         self.max_tokens = int(config.get("max_tokens", 2048))
         self.prompt = config.get("prompt", "What is in this image?")
-        self.max_workers = int(config.get("max_workers", 8))
+        self.prompt_echo_field = config.get("prompt_echo_field", None)
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for GeminiRemoteModel")
         self.api_key = api_key
         self.config = config
-        self.needs_fields = {}
+        self._needs_fields = {}
         self._session = requests.Session()
 
     @property
@@ -30,6 +26,14 @@ class GeminiRemoteModel(Model):
         """Returns the media type for the model."""
         # TODO: add support for other media types (VIDEO, AUDIO, etc.)
         return "image"
+
+    @property
+    def needs_fields(self):
+        return self._needs_fields
+
+    @needs_fields.setter
+    def needs_fields(self, fields):
+        self._needs_fields = fields or {}
 
     def _encode_image(self, image_path):
         with open(image_path, "rb") as f:
@@ -72,11 +76,7 @@ class GeminiRemoteModel(Model):
         except Exception:
             return str(data)
 
-    def predict(self, image, sample=None):
-        """Predict text for an image. Accepts path, PIL.Image, or numpy array.
-
-        Returns a plain string VQA response.
-        """
+    def _resolve_prompt(self, sample):
         prompt = self.prompt
         if sample is not None and isinstance(self.needs_fields, dict):
             prompt_field = self.needs_fields.get("prompt_field")
@@ -84,6 +84,13 @@ class GeminiRemoteModel(Model):
                 value = getattr(sample, prompt_field)
                 if value:
                     prompt = str(value)
+        return prompt
+
+    def predict(self, image, sample=None):
+        """Predict text for an image. Accepts path, PIL.Image, or numpy array.
+        Returns a plain string VQA response.
+        """
+        prompt = self._resolve_prompt(sample)
 
         if isinstance(image, str):
             try:
@@ -121,33 +128,12 @@ class GeminiRemoteModel(Model):
             {"text": prompt},
             {"inline_data": {"mime_type": mime_type, "data": b64}},
         ]
-        return self._post(parts)
-
-    def apply(self, sample_collection, prompt=None, prompt_field=None, label_field="gemini_output", image_field="filepath"):
-        if prompt is not None:
-            self.prompt = prompt
-        if prompt_field is not None:
-            self.needs_fields = {"prompt_field": prompt_field}
-        items = []
-        view = sample_collection.view()
-        for sample in view.iter_samples(autosave=False, progress=False):
-            items.append((sample.id, getattr(sample, image_field), sample))
-
-        results = {}
-        with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
-            futs = {ex.submit(self.predict, path, sample): sid for sid, path, sample in items}
-            for fut in as_completed(futs):
-                sid = futs[fut]
-                try:
-                    results[sid] = fut.result()
-                except Exception as e:
-                    results[sid] = str(e)
-
-        for sid, answer in results.items():
-            s = sample_collection[sid]
-            setattr(s, label_field, answer)
-            s.save()
-
-
-
+        result = self._post(parts)
+        if self.prompt_echo_field and sample is not None:
+            try:
+                setattr(sample, self.prompt_echo_field, prompt)
+                sample.save()
+            except Exception:
+                pass
+        return result
 
