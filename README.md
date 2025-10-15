@@ -1,5 +1,7 @@
 ## Gemini Vision Plugin
 
+![screen-2025-10-15_13 02 13-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/77b4a2f3-8e4b-40dd-921d-3771b257b8d9)
+
 ### Plugin Overview
 
 This plugin integrates Google Gemini's multimodal Vision models (e.g., `gemini-2.5-flash`)
