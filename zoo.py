@@ -56,7 +56,21 @@ class GeminiRemoteModel(Model):
         data = resp.json()
         if "error" in data:
             raise RuntimeError(data["error"].get("message") or str(data["error"]))
-        return data["candidates"][0]["content"]["parts"][0].get("text")
+        try:
+            candidates = data.get("candidates") or []
+            for cand in candidates:
+                content = cand.get("content") or {}
+                parts_list = content.get("parts") or []
+                texts = [p.get("text") for p in parts_list if isinstance(p, dict) and p.get("text")]
+                if texts:
+                    return "\n".join(texts)
+            pf = data.get("promptFeedback") or {}
+            block = pf.get("blockReason")
+            if block:
+                return f"Blocked by safety system ({block})."
+            return str(data)
+        except Exception:
+            return str(data)
 
     def predict(self, image, sample=None):
         """Predict text for an image. Accepts path, PIL.Image, or numpy array.
