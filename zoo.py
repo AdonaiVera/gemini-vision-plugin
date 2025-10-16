@@ -88,15 +88,20 @@ class GeminiRemoteModel(Model):
             return str(data)
 
     def _resolve_prompt(self, sample):
-        field_name = self._get_field()
-        if sample is not None and field_name:
-            try:
-                value = sample.get_field(field_name)
-            except Exception:
-                value = None
-            if value is not None and str(value).strip():
-                return str(value)
-        return self.prompt
+        """Resolve prompt from sample field or use default."""
+        prompt = self.prompt 
+        
+        if sample is not None and self._get_field() is not None:
+            field_value = sample.get_field(self._get_field())
+            if field_value is not None:
+                if hasattr(field_value, 'label'):
+                    prompt = str(field_value.label)
+                elif hasattr(field_value, 'classifications') and field_value.classifications:
+                    prompt = str(field_value.classifications[0].label)
+                else:
+                    prompt = str(field_value)
+        
+        return prompt
 
     def predict(self, image, sample=None):
         """Predict text for an image. Accepts path, PIL.Image, or numpy array.
