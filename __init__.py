@@ -223,7 +223,6 @@ class QueryGeminiVision(foo.Operator):
 def register(plugin):
     plugin.register(QueryGeminiVision)
 
-
 def download_model(model_name, model_path):
     """Prepare remote HTTP model; create a marker file at model_path."""
     return True

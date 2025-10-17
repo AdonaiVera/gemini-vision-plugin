@@ -3,10 +3,11 @@ import base64
 import requests
 import io
 from fiftyone.core.models import Model
+from fiftyone import SamplesMixin
 from PIL import Image
 import numpy as np
 
-class GeminiRemoteModel(Model):
+class GeminiRemoteModel(SamplesMixin, Model):
     def __init__(self, config=None):
         config = config or {}
         self.model = config.get("model", "gemini-2.5-flash")
@@ -16,7 +17,7 @@ class GeminiRemoteModel(Model):
             raise ValueError("GEMINI_API_KEY is required for GeminiRemoteModel")
         self.api_key = api_key
         self.config = config
-        self._needs_fields = {}
+        self._fields = {}
         self._session = requests.Session()
 
     @property
@@ -27,23 +28,20 @@ class GeminiRemoteModel(Model):
 
     @property
     def needs_fields(self):
-        return self._needs_fields
+        """A dict mapping model-specific keys to sample field names."""
+        return self._fields
 
     @needs_fields.setter
     def needs_fields(self, fields):
-        self._needs_fields = fields or {}
+        self._fields = fields
 
     def _get_field(self):
-        """Returns the prompt field name from needs_fields, if any."""
-        if isinstance(self.needs_fields, dict):
-            if "prompt_field" in self.needs_fields:
-                return self.needs_fields["prompt_field"]
-            if self.needs_fields:
-                try:
-                    return next(iter(self.needs_fields.values()))
-                except Exception:
-                    return None
-        return None
+        """Get the prompt field from needs_fields."""
+        if "prompt_field" in self.needs_fields:
+            prompt_field = self.needs_fields["prompt_field"]
+        else:
+            prompt_field = next(iter(self.needs_fields.values()), None)
+        return prompt_field
 
     def _encode_image(self, image_path):
         with open(image_path, "rb") as f:
@@ -87,59 +85,45 @@ class GeminiRemoteModel(Model):
             return str(data)
 
     def _resolve_prompt(self, sample):
-        """Resolve prompt from sample field."""
+        """Resolve prompt from sample field or use default."""
+        prompt = None  # No default prompt - must come from dataset
+        
         if sample is not None and self._get_field() is not None:
             field_value = sample.get_field(self._get_field())
             if field_value is not None:
-                if hasattr(field_value, 'label'):
-                    return str(field_value.label)
-                elif hasattr(field_value, 'classifications') and field_value.classifications:
-                    return str(field_value.classifications[0].label)
-                else:
-                    return str(field_value)
-        raise ValueError("No prompt provided in dataset field")
+                prompt = str(field_value)
+        
+        if not prompt:
+            raise ValueError("No prompt provided.")
+        
+        return prompt
 
-    def predict(self, image, sample=None):
-        """Predict text for an image. Accepts path, PIL.Image, or numpy array.
-        Returns a plain string VQA response.
-        """
+    def _predict(self, image: Image.Image, sample=None):
+        """Internal prediction method that does the actual inference."""
         prompt = self._resolve_prompt(sample)
 
-        if isinstance(image, str):
-            try:
-                pil = Image.open(image)
-                b64, mime_type = self._encode_pil(pil)
-            except Exception:
-                mime_type = "image/jpeg"
-                if image.lower().endswith(".png"):
-                    mime_type = "image/png"
-                b64 = self._encode_image(image)
-            parts = [
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": b64}},
-            ]
-            return self._post(parts)
-
-        if isinstance(image, np.ndarray):
-            image = Image.fromarray(image)
-
-        if not isinstance(image, Image.Image):
-            if sample is not None and hasattr(sample, "filepath"):
-                mime_type = "image/jpeg"
-                if sample.filepath.lower().endswith(".png"):
-                    mime_type = "image/png"
-                b64 = self._encode_image(sample.filepath)
-                parts = [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": mime_type, "data": b64}},
-                ]
-                return self._post(parts)
-            raise ValueError("Unsupported image type for predict()")
-
+        # Convert image to base64
         b64, mime_type = self._encode_pil(image)
         parts = [
             {"text": prompt},
             {"inline_data": {"mime_type": mime_type, "data": b64}},
         ]
         return self._post(parts)
+
+    def predict(self, image, sample=None):
+        """Predict text for an image. Accepts path, PIL.Image, or numpy array.
+        Returns a plain string VQA response.
+        """
+        # Convert input to PIL Image
+        if isinstance(image, str):
+            try:
+                image = Image.open(image).convert("RGB")
+            except Exception:
+                raise ValueError(f"Could not load image from path: {image}")
+        elif isinstance(image, np.ndarray):
+            image = Image.fromarray(image).convert("RGB")
+        elif not isinstance(image, Image.Image):
+            raise ValueError("Unsupported image type for predict()")
+        
+        return self._predict(image, sample)
 
