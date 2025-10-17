@@ -3,11 +3,10 @@ import base64
 import requests
 import io
 from fiftyone.core.models import Model
-from fiftyone import SamplesMixin
 from PIL import Image
 import numpy as np
 
-class GeminiRemoteModel(SamplesMixin, Model):
+class GeminiRemoteModel(Model):
     def __init__(self, config=None):
         config = config or {}
         self.model = config.get("model", "gemini-2.5-flash")
@@ -85,8 +84,8 @@ class GeminiRemoteModel(SamplesMixin, Model):
             return str(data)
 
     def _resolve_prompt(self, sample):
-        """Resolve prompt from sample field or use default."""
-        prompt = None  # No default prompt - must come from dataset
+        """Resolve prompt from sample field."""
+        prompt = None
         
         if sample is not None and self._get_field() is not None:
             field_value = sample.get_field(self._get_field())
@@ -101,8 +100,6 @@ class GeminiRemoteModel(SamplesMixin, Model):
     def _predict(self, image: Image.Image, sample=None):
         """Internal prediction method that does the actual inference."""
         prompt = self._resolve_prompt(sample)
-
-        # Convert image to base64
         b64, mime_type = self._encode_pil(image)
         parts = [
             {"text": prompt},

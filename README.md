@@ -88,17 +88,14 @@ model = foz.load_zoo_model(
     max_workers=16,
 )
 
-
 # Load a small sample dataset
 dataset = foz.load_zoo_dataset("quickstart", split="validation", max_samples=10)
 
-# Apply to a dataset (supports prompt_field or a static prompt)
-raw_output_field = "gemini_output"
-classification_field = None
+# Apply to a dataset (supports prompt_field for dynamic prompts)
 dataset.apply_model(
     model,
-    prompt_field="dynamic_prompt",
-    label_field=raw_output_field,
+    prompt_field="dynamic_prompt",  # Use dynamic prompts from dataset
+    label_field="gemini_output",
     image_field="filepath",
 )
 ```
