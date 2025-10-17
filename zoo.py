@@ -3,10 +3,11 @@ import base64
 import requests
 import io
 from fiftyone.core.models import Model
+from fiftyone import SamplesMixin
 from PIL import Image
 import numpy as np
 
-class GeminiRemoteModel(Model):
+class GeminiRemoteModel(SamplesMixin, Model):
     def __init__(self, config=None):
         config = config or {}
         self.model = config.get("model", "gemini-2.5-flash")
