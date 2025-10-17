@@ -98,21 +98,10 @@ class GeminiRemoteModel(SamplesMixin, Model):
         
         return prompt
 
-    def _predict(self, image: Image.Image, sample=None):
-        """Internal prediction method that does the actual inference."""
-        prompt = self._resolve_prompt(sample)
-        b64, mime_type = self._encode_pil(image)
-        parts = [
-            {"text": prompt},
-            {"inline_data": {"mime_type": mime_type, "data": b64}},
-        ]
-        return self._post(parts)
-
     def predict(self, image, sample=None):
         """Predict text for an image. Accepts path, PIL.Image, or numpy array.
         Returns a plain string VQA response.
         """
-        # Convert input to PIL Image
         if isinstance(image, str):
             try:
                 image = Image.open(image).convert("RGB")
@@ -123,5 +112,12 @@ class GeminiRemoteModel(SamplesMixin, Model):
         elif not isinstance(image, Image.Image):
             raise ValueError("Unsupported image type for predict()")
         
-        return self._predict(image, sample)
+        # Do the actual inference
+        prompt = self._resolve_prompt(sample)
+        b64, mime_type = self._encode_pil(image)
+        parts = [
+            {"text": prompt},
+            {"inline_data": {"mime_type": mime_type, "data": b64}},
+        ]
+        return self._post(parts)
 
