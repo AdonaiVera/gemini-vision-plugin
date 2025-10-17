@@ -11,7 +11,6 @@ class GeminiRemoteModel(Model):
         config = config or {}
         self.model = config.get("model", "gemini-2.5-flash")
         self.max_tokens = int(config.get("max_tokens", 2048))
-        self.prompt = config.get("prompt", "What is in this image?")
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for GeminiRemoteModel")
@@ -88,20 +87,17 @@ class GeminiRemoteModel(Model):
             return str(data)
 
     def _resolve_prompt(self, sample):
-        """Resolve prompt from sample field or use default."""
-        prompt = self.prompt 
-        
+        """Resolve prompt from sample field."""
         if sample is not None and self._get_field() is not None:
             field_value = sample.get_field(self._get_field())
             if field_value is not None:
                 if hasattr(field_value, 'label'):
-                    prompt = str(field_value.label)
+                    return str(field_value.label)
                 elif hasattr(field_value, 'classifications') and field_value.classifications:
-                    prompt = str(field_value.classifications[0].label)
+                    return str(field_value.classifications[0].label)
                 else:
-                    prompt = str(field_value)
-        
-        return prompt
+                    return str(field_value)
+        raise ValueError("No prompt provided in dataset field")
 
     def predict(self, image, sample=None):
         """Predict text for an image. Accepts path, PIL.Image, or numpy array.
