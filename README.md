@@ -122,6 +122,26 @@ Inputs:
 Select 2-3 images from your dataset (optimally up to 3 images). The composed
 image is automatically saved to your dataset.
 
+### `video_understanding`
+
+**Demo Video:**
+
+<!-- Add video here -->
+
+Analyze and extract information from videos using Gemini's video understanding capabilities.
+
+Inputs:
+- `task_type`: Choose analysis type (describe, segment, extract, question)
+- `prompt`: Analysis prompt describing what you want to know about the video
+
+Features:
+- **Describe**: Get a comprehensive description of video content
+- **Segment**: Identify and describe different segments within the video
+- **Extract**: Extract specific information from the video
+- **Question**: Ask specific questions about video content, including timestamp-based queries (e.g., "What happens at 0:30?")
+
+Select exactly one video from your dataset. The video must be under 20MB for inline analysis. Analysis results are automatically saved to the video sample's metadata under the `video_analysis` field.
+
 Happy exploring!
 
 ## Next Steps

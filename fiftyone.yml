@@ -9,3 +9,4 @@ operators:
   - text_to_image
   - image_editing
   - multi_image_composition
+  - video_understanding

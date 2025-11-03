@@ -30,6 +30,18 @@ def encode_image(image_path):
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 
+def encode_video(video_path):
+    """Encode video file to base64."""
+    with open(video_path, "rb") as video_file:
+        return base64.b64encode(video_file.read()).decode("utf-8")
+
+
+def get_video_size_mb(video_path):
+    """Get video file size in MB."""
+    size_bytes = os.path.getsize(video_path)
+    return size_bytes / (1024 * 1024)
+
+
 def get_closest_aspect_ratio(width, height):
     """Calculate the closest supported aspect ratio from image dimensions."""
     supported_ratios = {
@@ -248,6 +260,83 @@ def compose_images(image_paths, prompt, aspect_ratio="1:1"):
         raise ValueError("No image data in response")
     except Exception as e:
         raise ValueError(f"Failed to extract image: {str(e)}")
+
+
+def analyze_video(video_path, prompt, task_type="describe"):
+    """Analyze video using Gemini Vision API.
+
+    Args:
+        video_path: Path to video file
+        prompt: User prompt for video analysis
+        task_type: Type of analysis (describe, segment, extract, question)
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key
+    }
+
+    # Get video mime type
+    video_ext = video_path.lower().split('.')[-1]
+    mime_type_map = {
+        'mp4': 'video/mp4',
+        'mpeg': 'video/mpeg',
+        'mov': 'video/mov',
+        'avi': 'video/avi',
+        'flv': 'video/x-flv',
+        'mpg': 'video/mpg',
+        'webm': 'video/webm',
+        'wmv': 'video/wmv',
+        '3gp': 'video/3gpp',
+    }
+    mime_type = mime_type_map.get(video_ext, 'video/mp4')
+
+    # Encode video
+    base64_video = encode_video(video_path)
+
+    # Build payload
+    payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64_video
+                    }
+                },
+                {"text": prompt}
+            ]
+        }]
+    }
+
+    response = requests.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        headers=headers,
+        json=payload,
+    )
+
+    content = response.json()
+    if "error" in content:
+        err = content.get("error", {})
+        raise ValueError(err.get("message") or str(err))
+
+    try:
+        candidates = content.get("candidates", [])
+        if not candidates:
+            raise ValueError("No candidates in response")
+
+        parts = candidates[0]["content"]["parts"]
+        response_text = ""
+        for part in parts:
+            if "text" in part:
+                response_text += part["text"]
+
+        if not response_text:
+            raise ValueError("No text response from model")
+
+        return response_text
+    except Exception as e:
+        raise ValueError(f"Failed to analyze video: {str(e)}")
 
 
 def query_gemini_vision(ctx):
@@ -704,11 +793,176 @@ class MultiImageComposition(foo.Operator):
         return types.Property(outputs, view=types.View(label="Image Composition Result"))
 
 
+class VideoUnderstanding(foo.Operator):
+    @property
+    def config(self):
+        _config = foo.OperatorConfig(
+            name="video_understanding",
+            label="Gemini: Analyze Video",
+            dynamic=True,
+        )
+        _config.icon = "/assets/icon_video.svg"
+        return _config
+
+    def resolve_placement(self, ctx):
+        return types.Placement(
+            types.Places.SAMPLES_GRID_ACTIONS,
+            types.Button(
+                label="Analyze Video",
+                icon="/assets/icon_video.svg",
+                prompt=True,
+            ),
+        )
+
+    def resolve_input(self, ctx):
+        inputs = types.Object()
+        form_view = types.View(
+            label="Video Understanding",
+            description="Analyze video content using Gemini Vision",
+        )
+
+        if not allows_gemini_models():
+            inputs.message(
+                "no_gemini_key",
+                label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
+            )
+            return types.Property(inputs)
+
+        num_selected = len(ctx.selected)
+        if num_selected == 0:
+            inputs.str(
+                "no_sample_warning",
+                view=types.Warning(
+                    label="You must select exactly one video to analyze"
+                ),
+            )
+        elif num_selected > 1:
+            inputs.str(
+                "multiple_samples_warning",
+                view=types.Warning(
+                    label=f"Please select only one video. You have {num_selected} selected."
+                ),
+            )
+        else:
+            # Check if selected sample is a video and within size limit
+            sample_id = ctx.selected[0]
+            filepath = ctx.dataset[sample_id].filepath
+
+            # Check file size
+            try:
+                video_size_mb = get_video_size_mb(filepath)
+                if video_size_mb > 20:
+                    inputs.str(
+                        "size_warning",
+                        view=types.Error(
+                            label=f"Video is too large ({video_size_mb:.1f}MB). Maximum size is 20MB for inline video analysis."
+                        ),
+                    )
+                    return types.Property(inputs, view=form_view)
+            except Exception as e:
+                inputs.str(
+                    "error_warning",
+                    view=types.Error(
+                        label=f"Error checking video file: {str(e)}"
+                    ),
+                )
+                return types.Property(inputs, view=form_view)
+
+            inputs.enum(
+                "task_type",
+                values=["describe", "segment", "extract", "question"],
+                default="describe",
+                label="Analysis Type",
+                description="Choose the type of video analysis to perform",
+            )
+
+            inputs.str(
+                "prompt",
+                label="Analysis Prompt",
+                required=True,
+                description="Describe what you want to analyze in the video. For questions, include specific timestamps if needed (e.g., 'What happens at 0:30?')",
+            )
+
+        return types.Property(inputs, view=form_view)
+
+    def execute(self, ctx):
+        if len(ctx.selected) != 1:
+            return {"status": "error", "error": "Please select exactly one video"}
+
+        sample_id = ctx.selected[0]
+        filepath = ctx.dataset[sample_id].filepath
+        prompt = ctx.params.get("prompt")
+        task_type = ctx.params.get("task_type", "describe")
+
+        try:
+            # Check video size
+            video_size_mb = get_video_size_mb(filepath)
+            if video_size_mb > 20:
+                return {
+                    "status": "error",
+                    "error": f"Video is too large ({video_size_mb:.1f}MB). Maximum size is 20MB.",
+                    "prompt": prompt,
+                    "task_type": task_type
+                }
+
+            # Analyze video
+            result = analyze_video(filepath, prompt, task_type)
+
+            # Store result in sample metadata
+            sample = ctx.dataset[sample_id]
+
+            analysis_entry = {
+                "prompt": prompt,
+                "task_type": task_type,
+                "result": result,
+                "timestamp": datetime.now().isoformat()
+            }
+
+            # Append to existing analysis or create new list
+            if sample.has_field("video_analysis") and sample["video_analysis"] is not None:
+                current_analysis = sample["video_analysis"]
+                if isinstance(current_analysis, list):
+                    current_analysis.append(analysis_entry)
+                else:
+                    current_analysis = [analysis_entry]
+                sample["video_analysis"] = current_analysis
+            else:
+                sample["video_analysis"] = [analysis_entry]
+
+            sample.save()
+
+            return {
+                "prompt": prompt,
+                "task_type": task_type,
+                "result": result,
+                "status": "success",
+                "video_size_mb": f"{video_size_mb:.2f}"
+            }
+        except Exception as e:
+            return {
+                "prompt": prompt,
+                "task_type": task_type,
+                "status": "error",
+                "error": str(e)
+            }
+
+    def resolve_output(self, ctx):
+        outputs = types.Object()
+        outputs.str("prompt", label="Analysis Prompt")
+        outputs.str("task_type", label="Analysis Type")
+        outputs.str("status", label="Status")
+        outputs.str("result", label="Analysis Result")
+        outputs.str("video_size_mb", label="Video Size (MB)")
+        outputs.str("error", label="Error Details")
+        return types.Property(outputs, view=types.View(label="Video Analysis Result"))
+
+
 def register(plugin):
     plugin.register(QueryGeminiVision)
     plugin.register(TextToImage)
     plugin.register(ImageEditing)
     plugin.register(MultiImageComposition)
+    plugin.register(VideoUnderstanding)
 
 def download_model(model_name, model_path):
     """Prepare remote HTTP model; create a marker file at model_path."""
