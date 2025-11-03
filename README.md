@@ -59,10 +59,7 @@ session = fo.launch_app(dataset)
 ## Operators
 
 ### `query_gemini_vision`
-
-**Demo Video:**
-
-<!-- Add video here -->
+![first_video-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/17d0afd7-5aeb-413b-815a-0f8b04628da6)
 
 Chat with your images using Gemini Vision models.
 
@@ -76,10 +73,8 @@ prompt to the Gemini Vision API. The model's text response is displayed in the
 output panel.
 
 ### `text_to_image`
+![text_image-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/5eb1ce21-3cfd-4649-ba5e-24e2a035c7c4)
 
-**Demo Video:**
-
-<!-- Add video here -->
 
 Generate high-quality images from text descriptions using Gemini's image generation capabilities.
 
@@ -91,10 +86,7 @@ The generated image is automatically saved to your dataset with metadata includi
 the prompt and generation type.
 
 ### `image_editing`
-
-**Demo Video:**
-
-<!-- Add video here -->
+![edit_image](https://github.com/user-attachments/assets/e0b6a483-fe22-464f-98f2-4d27b5cf21eb)
 
 Edit existing images using text instructions. Provide an image and use text prompts
 to add, remove, or modify elements, change the style, or adjust the color grading.
@@ -108,10 +100,6 @@ saved to your dataset with the original prompt preserved.
 
 ### `multi_image_composition`
 
-**Demo Video:**
-
-<!-- Add video here -->
-
 Compose a new image from multiple input images. Use multiple images to create
 a new scene or transfer the style from one image to another.
 
@@ -123,10 +111,7 @@ Select 2-3 images from your dataset (optimally up to 3 images). The composed
 image is automatically saved to your dataset.
 
 ### `video_understanding`
-
-**Demo Video:**
-
-<!-- Add video here -->
+![video_describing-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/559420bd-2b08-4941-a2db-12d373eff178)
 
 Analyze and extract information from videos using Gemini's video understanding capabilities.
 
