@@ -26,7 +26,15 @@ To use Gemini Vision, set the following environment variable with your API key:
 
 - `GEMINI_API_KEY`
 
-Refer to the official docs for pricing and quotas: `https://ai.google.dev/gemini-api/docs`.
+**Getting your API Key:** Follow this step-by-step guide to create your Gemini API key: [Getting Your API Key Guide](https://github.com/google-gemini/nano-banana-hackathon-kit/blob/main/guides/01-getting-your-api-key.ipynb)
+
+**Important:** You need an active Google Cloud account with billing enabled and credits to use the Gemini API. The free tier has limited quotas. If you encounter quota errors like "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests", you'll need to:
+
+1. Enable billing on your Google Cloud project
+2. Purchase credits or upgrade to a paid plan
+3. Monitor your usage at: https://ai.dev/usage?tab=rate-limit
+
+Refer to the official docs for pricing and quotas: https://ai.google.dev/gemini-api/docs/rate-limits
 
 ### Getting your Data into FiftyOne
 
@@ -36,10 +44,12 @@ you don't have a dataset, you can create one from a directory of images:
 ```python
 import fiftyone as fo
 
-dataset = fo.Dataset.from_images_dir("/path/to/images")
-
-## optionally name the dataset and persist to disk
-dataset.name = "my-dataset"
+# Load BDD unsafe/safe dataset 
+dataset = foz.load_zoo_dataset(
+    "https://github.com/AdonaiVera/bddoia-fiftyone",
+    split="validation",
+    max_samples=10
+)
 dataset.persistent = True
 
 ## view the dataset in the App
@@ -50,16 +60,83 @@ session = fo.launch_app(dataset)
 
 ### `query_gemini_vision`
 
-Inputs:
+**Demo Video:**
 
+<!-- Add video here -->
+
+Chat with your images using Gemini Vision models.
+
+Inputs:
 - `query_text`: The text to prompt Gemini with
+- `model`: Select from available Gemini models
 - `max_tokens`: The maximum number of output tokens to generate
 
 The operator encodes all selected images and sends them along with your text
 prompt to the Gemini Vision API. The model's text response is displayed in the
 output panel.
 
+### `text_to_image`
+
+**Demo Video:**
+
+<!-- Add video here -->
+
+Generate high-quality images from text descriptions using Gemini's image generation capabilities.
+
+Inputs:
+- `prompt`: Text description of the image to generate
+- `aspect_ratio`: Choose from multiple aspect ratios (1:1, 16:9, 9:16, etc.)
+
+The generated image is automatically saved to your dataset with metadata including
+the prompt and generation type.
+
+### `image_editing`
+
+**Demo Video:**
+
+<!-- Add video here -->
+
+Edit existing images using text instructions. Provide an image and use text prompts
+to add, remove, or modify elements, change the style, or adjust the color grading.
+
+Inputs:
+- `prompt`: Edit instruction (e.g., "add sunglasses", "change to watercolor style")
+- `aspect_ratio`: Choose from multiple aspect ratios
+
+Select exactly one image from your dataset. The edited image is automatically
+saved to your dataset with the original prompt preserved.
+
+### `multi_image_composition`
+
+**Demo Video:**
+
+<!-- Add video here -->
+
+Compose a new image from multiple input images. Use multiple images to create
+a new scene or transfer the style from one image to another.
+
+Inputs:
+- `prompt`: Composition instruction (e.g., "combine these in a collage", "transfer style from first to second")
+- `aspect_ratio`: Choose from multiple aspect ratios
+
+Select 2-3 images from your dataset (optimally up to 3 images). The composed
+image is automatically saved to your dataset.
+
 Happy exploring!
+
+## Next Steps
+
+If you like this plugin and find it useful, please leave a ⭐ star on the repository!
+
+### Future Enhancements
+
+We're planning to add more exciting features:
+
+- **Batch Image Generation**: Create multiple images from a single query
+- **Pipeline Support**: Build workflows to generate multiple images with different variations
+- **Dynamic Prompting**: Use dynamic variables per image for automated, customized generation at scale
+
+Stay tuned for updates!
 
 ## Remote Zoo Model
 

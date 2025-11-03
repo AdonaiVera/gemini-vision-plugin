@@ -1,3 +1,5 @@
 __pycache__
 *.cython
 *.pyc
+.DS_Store
+*.DS_Store
