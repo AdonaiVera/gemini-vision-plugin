@@ -10,3 +10,5 @@ operators:
   - image_editing
   - multi_image_composition
   - video_understanding
+secrets:
+  - GEMINI_API_KEY 
