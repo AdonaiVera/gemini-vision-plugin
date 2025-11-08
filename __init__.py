@@ -20,9 +20,9 @@ import requests
 from PIL import Image
 
 
-def allows_gemini_models():
+def allows_gemini_models(ctx):
     """Returns whether the current environment allows Gemini models."""
-    return "GEMINI_API_KEY" in os.environ
+    return "GEMINI_API_KEY" in ctx.secrets.keys()
 
 
 def encode_image(image_path):
@@ -111,9 +111,8 @@ def save_image_to_dataset(dataset, base64_data, prompt, operation_type="generate
         raise ValueError(f"Failed to save image: {str(e)}")
 
 
-def generate_image(prompt, aspect_ratio="1:1"):
+def generate_image(prompt, api_key, aspect_ratio="1:1"):
     """Generate image from text prompt using Gemini."""
-    api_key = os.environ.get("GEMINI_API_KEY")
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key
@@ -158,9 +157,8 @@ def generate_image(prompt, aspect_ratio="1:1"):
         raise ValueError(f"Failed to extract image: {str(e)}. Response: {content}")
 
 
-def edit_image(image_path, prompt, aspect_ratio="1:1"):
+def edit_image(image_path, prompt, api_key, aspect_ratio="1:1"):
     """Edit image using text prompt."""
-    api_key = os.environ.get("GEMINI_API_KEY")
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key
@@ -210,9 +208,8 @@ def edit_image(image_path, prompt, aspect_ratio="1:1"):
         raise ValueError(f"Failed to extract image: {str(e)}")
 
 
-def compose_images(image_paths, prompt, aspect_ratio="1:1"):
+def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1"):
     """Compose multiple images with text prompt."""
-    api_key = os.environ.get("GEMINI_API_KEY")
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key
@@ -262,7 +259,7 @@ def compose_images(image_paths, prompt, aspect_ratio="1:1"):
         raise ValueError(f"Failed to extract image: {str(e)}")
 
 
-def analyze_video(video_path, prompt, task_type="describe"):
+def analyze_video(video_path, prompt, api_key, task_type="describe"):
     """Analyze video using Gemini Vision API.
 
     Args:
@@ -270,7 +267,6 @@ def analyze_video(video_path, prompt, task_type="describe"):
         prompt: User prompt for video analysis
         task_type: Type of analysis (describe, segment, extract, question)
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key
@@ -375,7 +371,7 @@ def query_gemini_vision(ctx):
         "generationConfig": {"maxOutputTokens": max_tokens},
     }
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = ctx.secrets.get("GEMINI_API_KEY")
     headers = {"Content-Type": "application/json"}
 
     headers["x-goog-api-key"] = api_key
@@ -431,7 +427,7 @@ class QueryGeminiVision(foo.Operator):
             description="Ask a question about the selected image!",
         )
 
-        gemini_flag = allows_gemini_models()
+        gemini_flag = allows_gemini_models(ctx)
         if not gemini_flag:
             inputs.message(
                 "no_gemini_key",
@@ -465,7 +461,7 @@ class QueryGeminiVision(foo.Operator):
                 "query_text", label="Query about your images", required=True
             )
             # Populate model dropdown from live list; fall back to text if unavailable
-            api_key = os.environ.get("GEMINI_API_KEY")
+            api_key = ctx.secrets.get("GEMINI_API_KEY")
             model_choices = list_gemini_models(api_key) if api_key else []
             default_model = "gemini-2.5-flash"
             if model_choices:
@@ -536,7 +532,7 @@ class TextToImage(foo.Operator):
             description="Generate an image from a text prompt",
         )
 
-        if not allows_gemini_models():
+        if not allows_gemini_models(ctx):
             inputs.message(
                 "no_gemini_key",
                 label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
@@ -577,7 +573,8 @@ class TextToImage(foo.Operator):
             else:
                 aspect_ratio = ctx.params.get("aspect_ratio", "1:1")
 
-            image_data = generate_image(prompt, aspect_ratio)
+            api_key = ctx.secrets.get("GEMINI_API_KEY")
+            image_data = generate_image(prompt, api_key, aspect_ratio)
             filepath = save_image_to_dataset(ctx.dataset, image_data, prompt, "text_to_image")
             return {"prompt": prompt, "filepath": filepath, "status": "success"}
         except Exception as e:
@@ -620,7 +617,7 @@ class ImageEditing(foo.Operator):
             description="Edit selected image with text instructions",
         )
 
-        if not allows_gemini_models():
+        if not allows_gemini_models(ctx):
             inputs.message(
                 "no_gemini_key",
                 label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
@@ -677,7 +674,8 @@ class ImageEditing(foo.Operator):
             else:
                 aspect_ratio = ctx.params.get("aspect_ratio", "1:1")
 
-            image_data = edit_image(filepath, prompt, aspect_ratio)
+            api_key = ctx.secrets.get("GEMINI_API_KEY")
+            image_data = edit_image(filepath, prompt, api_key, aspect_ratio)
             new_filepath = save_image_to_dataset(ctx.dataset, image_data, prompt, "image_editing")
             return {"prompt": prompt, "filepath": new_filepath, "status": "success"}
         except Exception as e:
@@ -720,7 +718,7 @@ class MultiImageComposition(foo.Operator):
             description="Compose a new image from multiple selected images",
         )
 
-        if not allows_gemini_models():
+        if not allows_gemini_models(ctx):
             inputs.message(
                 "no_gemini_key",
                 label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
@@ -777,7 +775,8 @@ class MultiImageComposition(foo.Operator):
             else:
                 aspect_ratio = ctx.params.get("aspect_ratio", "1:1")
 
-            image_data = compose_images(image_paths, prompt, aspect_ratio)
+            api_key = ctx.secrets.get("GEMINI_API_KEY")
+            image_data = compose_images(image_paths, prompt, api_key, aspect_ratio)
             new_filepath = save_image_to_dataset(ctx.dataset, image_data, prompt, "multi_image_composition")
             return {"prompt": prompt, "filepath": new_filepath, "status": "success", "images_used": min(len(image_paths), 3)}
         except Exception as e:
@@ -821,7 +820,7 @@ class VideoUnderstanding(foo.Operator):
             description="Analyze video content using Gemini Vision",
         )
 
-        if not allows_gemini_models():
+        if not allows_gemini_models(ctx):
             inputs.message(
                 "no_gemini_key",
                 label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
@@ -906,7 +905,8 @@ class VideoUnderstanding(foo.Operator):
                 }
 
             # Analyze video
-            result = analyze_video(filepath, prompt, task_type)
+            api_key = ctx.secrets.get("GEMINI_API_KEY")
+            result = analyze_video(filepath, prompt, api_key, task_type)
 
             # Store result in sample metadata
             sample = ctx.dataset[sample_id]
