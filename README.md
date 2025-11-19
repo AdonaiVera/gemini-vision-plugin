@@ -4,9 +4,9 @@
 
 ### Plugin Overview
 
-This plugin integrates Google Gemini's multimodal Vision models (e.g., `gemini-2.5-flash`)
+This plugin integrates Google Gemini's multimodal Vision models (including the latest `gemini-3-pro-preview`)
 into your FiftyOne workflows. Prompt with text and one or more images; receive a
-text response grounded in visual inputs.
+text response grounded in visual inputs. Now featuring Gemini 3.0 with advanced reasoning capabilities!
 
 ## Installation
 
@@ -65,12 +65,13 @@ Chat with your images using Gemini Vision models.
 
 Inputs:
 - `query_text`: The text to prompt Gemini with
-- `model`: Select from available Gemini models
-- `max_tokens`: The maximum number of output tokens to generate
+- `model`: Select from available Gemini models (default: `gemini-3-pro-preview`)
+- `thinking_level`: **NEW in Gemini 3.0** - Control reasoning depth (`low` for speed/cost, `high` for complex reasoning)
+- `max_tokens`: The maximum number of output tokens to generate (up to 64K with Gemini 3.0)
 
 The operator encodes all selected images and sends them along with your text
 prompt to the Gemini Vision API. The model's text response is displayed in the
-output panel.
+output panel. With Gemini 3.0, you get 1M token context window and enhanced reasoning!
 
 ### `text_to_image`
 ![text_image-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/5eb1ce21-3cfd-4649-ba5e-24e2a035c7c4)
@@ -118,6 +119,12 @@ Analyze and extract information from videos using Gemini's video understanding c
 Inputs:
 - `task_type`: Choose analysis type (describe, segment, extract, question)
 - `prompt`: Analysis prompt describing what you want to know about the video
+- `model`: Select from available Gemini models (default: `gemini-3-pro-preview`)
+- `thinking_level`: **NEW in Gemini 3.0** - Control reasoning depth (`low` for speed/cost, `high` for complex reasoning)
+- `media_resolution`: **NEW in Gemini 3.0** - Video frame resolution control:
+  - `high` (1,120 tokens/frame) - Recommended for detailed analysis
+  - `medium` (560 tokens/frame) - Optimal for PDFs
+  - `low` (70 tokens/frame) - Most efficient, fewer tokens consumed
 
 Features:
 - **Describe**: Get a comprehensive description of video content
@@ -125,7 +132,7 @@ Features:
 - **Extract**: Extract specific information from the video
 - **Question**: Ask specific questions about video content, including timestamp-based queries (e.g., "What happens at 0:30?")
 
-Select exactly one video from your dataset. The video must be under 20MB for inline analysis. Analysis results are automatically saved to the video sample's metadata under the `video_analysis` field.
+Select exactly one video from your dataset. The video must be under 20MB for inline analysis. Analysis results are automatically saved to the video sample's metadata under the `video_analysis` field. Gemini 3.0 consumes fewer tokens per video while providing better reasoning!
 
 Happy exploring!
 
@@ -165,9 +172,11 @@ foz.register_zoo_model_source(
 # Load the model (Gemini remote HTTP model)
 model = foz.load_zoo_model(
     "google/Gemini-Vision",
-    model="gemini-2.5-flash",
-    max_tokens=2048,
+    model="gemini-3-pro-preview",  # Use Gemini 3.0 with advanced reasoning
+    max_tokens=65536,  # Full 64K token output
     max_workers=16,
+    thinking_level="high",  # NEW: Control reasoning depth (low/high)
+    media_resolution="high",  # NEW: Control media processing resolution (low/medium/high)
 )
 
 # Load a small sample dataset
