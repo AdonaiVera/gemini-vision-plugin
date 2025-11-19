@@ -10,8 +10,10 @@ import numpy as np
 class GeminiRemoteModel(SamplesMixin, Model):
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "gemini-2.5-flash")
-        self.max_tokens = int(config.get("max_tokens", 2048))
+        self.model = config.get("model", "gemini-3-pro-preview")
+        self.max_tokens = int(config.get("max_tokens", 65536))
+        self.thinking_level = config.get("thinking_level", "high")
+        self.media_resolution = config.get("media_resolution", "high")
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for GeminiRemoteModel")
@@ -59,8 +61,10 @@ class GeminiRemoteModel(SamplesMixin, Model):
             "generationConfig": {"maxOutputTokens": self.max_tokens},
         }
         headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
+
+        api_version = "v1beta" if self.model.startswith("gemini-3") else "v1"
         resp = self._session.post(
-            f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent",
+            f"https://generativelanguage.googleapis.com/{api_version}/models/{self.model}:generateContent",
             headers=headers,
             json=payload,
             timeout=60,

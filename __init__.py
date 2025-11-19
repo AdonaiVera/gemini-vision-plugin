@@ -68,6 +68,8 @@ def list_gemini_models(api_key):
     Model ids are returned without the leading "models/" prefix for convenient use
     in the v1 models endpoint path.
     """
+    manual_models = ["gemini-3-pro-preview"]
+
     try:
         headers = {"x-goog-api-key": api_key}
         resp = requests.get(
@@ -82,9 +84,20 @@ def list_gemini_models(api_key):
             name = m.get("name", "")
             if "generateContent" in methods and name.startswith("models/"):
                 models.append(name.split("/", 1)[1])
-        return sorted(set(models))
+
+        all_models = set(manual_models + models)
+
+        def sort_key(model):
+            if model.startswith("gemini-3"):
+                return (0, model)
+            elif model.startswith("gemini-2"):
+                return (1, model)
+            else:
+                return (2, model)
+
+        return sorted(all_models, key=sort_key)
     except Exception:
-        return []
+        return manual_models
 
 
 def save_image_to_dataset(dataset, base64_data, prompt, operation_type="generated"):
@@ -259,13 +272,16 @@ def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1"):
         raise ValueError(f"Failed to extract image: {str(e)}")
 
 
-def analyze_video(video_path, prompt, api_key, task_type="describe"):
+def analyze_video(video_path, prompt, api_key, task_type="describe", model="gemini-3-pro-preview", thinking_level="high", media_resolution="high"):
     """Analyze video using Gemini Vision API.
 
     Args:
         video_path: Path to video file
         prompt: User prompt for video analysis
         task_type: Type of analysis (describe, segment, extract, question)
+        model: Gemini model to use (default: gemini-3-pro-preview)
+        thinking_level: Reasoning depth for Gemini 3.0 (low/high)
+        media_resolution: Video frame resolution (low/medium/high)
     """
     headers = {
         "Content-Type": "application/json",
@@ -302,11 +318,11 @@ def analyze_video(video_path, prompt, api_key, task_type="describe"):
                 },
                 {"text": prompt}
             ]
-        }]
+        }],
+        "generationConfig": {}
     }
-
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
     )
@@ -340,8 +356,9 @@ def query_gemini_vision(ctx):
     dataset = ctx.dataset
     sample_ids = ctx.selected
     query_text = ctx.params.get("query_text", None)
-    max_tokens = ctx.params.get("max_tokens", 300)
-    model_name = ctx.params.get("model", "gemini-2.5-flash")
+    max_tokens = ctx.params.get("max_tokens", 65536)
+    model_name = ctx.params.get("model", "gemini-3-pro-preview")
+    thinking_level = ctx.params.get("thinking_level", "high")
 
     parts = []
     if query_text:
@@ -375,8 +392,10 @@ def query_gemini_vision(ctx):
     headers = {"Content-Type": "application/json"}
 
     headers["x-goog-api-key"] = api_key
+
+    api_version = "v1beta" if model_name.startswith("gemini-3") else "v1"
     response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent",
+        f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent",
         headers=headers,
         json=payload,
     )
@@ -463,7 +482,7 @@ class QueryGeminiVision(foo.Operator):
             # Populate model dropdown from live list; fall back to text if unavailable
             api_key = ctx.secrets.get("GEMINI_API_KEY")
             model_choices = list_gemini_models(api_key) if api_key else []
-            default_model = "gemini-2.5-flash"
+            default_model = "gemini-3-pro-preview"
             if model_choices:
                 inputs.enum(
                     "model",
@@ -477,15 +496,23 @@ class QueryGeminiVision(foo.Operator):
                     "model",
                     label="Model",
                     default=default_model,
-                    description="The Gemini model to use (e.g., gemini-2.5-flash)",
+                    description="The Gemini model to use (e.g., gemini-3-pro-preview)",
                 )
+
+            inputs.enum(
+                "thinking_level",
+                values=["low", "high"],
+                default="high",
+                label="Thinking Level",
+                description="Reasoning depth: 'low' minimizes latency/cost, 'high' maximizes reasoning (Gemini 3.0 only)",
+            )
 
         inputs.int(
             "max_tokens",
             label="Max output tokens",
-            default=2048,
+            default=65536,
             description=(
-                "The maximum number of tokens to generate. Higher values may increase cost."
+                "The maximum number of output tokens (64K). Gemini 3.0 supports full 64K token output."
             ),
             view=types.FieldView(),
         )
@@ -512,7 +539,7 @@ class TextToImage(foo.Operator):
             label="Gemini: Generate Image from Text",
             dynamic=True,
         )
-        _config.icon = "/assets/banana.svg"
+        _config.icon = "/assets/text_image.svg"
         return _config
 
     def resolve_placement(self, ctx):
@@ -520,7 +547,7 @@ class TextToImage(foo.Operator):
             types.Places.SAMPLES_GRID_ACTIONS,
             types.Button(
                 label="Text to Image",
-                icon="/assets/banana.svg",
+                icon="/assets/text_image.svg",
                 prompt=True,
             ),
         )
@@ -698,7 +725,7 @@ class MultiImageComposition(foo.Operator):
             label="Gemini: Compose Multiple Images",
             dynamic=True,
         )
-        _config.icon = "/assets/banana.svg"
+        _config.icon = "/assets/multiple_image.svg"
         return _config
 
     def resolve_placement(self, ctx):
@@ -706,7 +733,7 @@ class MultiImageComposition(foo.Operator):
             types.Places.SAMPLES_GRID_ACTIONS,
             types.Button(
                 label="Compose Images",
-                icon="/assets/banana.svg",
+                icon="/assets/multiple_image.svg",
                 prompt=True,
             ),
         )
@@ -882,6 +909,41 @@ class VideoUnderstanding(foo.Operator):
                 description="Describe what you want to analyze in the video. For questions, include specific timestamps if needed (e.g., 'What happens at 0:30?')",
             )
 
+            api_key = ctx.secrets.get("GEMINI_API_KEY")
+            model_choices = list_gemini_models(api_key) if api_key else []
+            default_model = "gemini-3-pro-preview"
+            if model_choices:
+                inputs.enum(
+                    "model",
+                    values=model_choices,
+                    default=default_model if default_model in model_choices else model_choices[0],
+                    label="Model",
+                    description="Select a Gemini model",
+                )
+            else:
+                inputs.str(
+                    "model",
+                    label="Model",
+                    default=default_model,
+                    description="The Gemini model to use (e.g., gemini-3-pro-preview)",
+                )
+
+            inputs.enum(
+                "thinking_level",
+                values=["low", "high"],
+                default="high",
+                label="Thinking Level",
+                description="Reasoning depth: 'low' minimizes latency/cost, 'high' maximizes reasoning (Gemini 3.0 only)",
+            )
+
+            inputs.enum(
+                "media_resolution",
+                values=["low", "medium", "high"],
+                default="high",
+                label="Media Resolution",
+                description="Video frame resolution: 'high' (1,120 tokens/frame) for analysis, 'medium' (560) for PDFs, 'low' (70) for efficiency",
+            )
+
         return types.Property(inputs, view=form_view)
 
     def execute(self, ctx):
@@ -892,6 +954,9 @@ class VideoUnderstanding(foo.Operator):
         filepath = ctx.dataset[sample_id].filepath
         prompt = ctx.params.get("prompt")
         task_type = ctx.params.get("task_type", "describe")
+        model = ctx.params.get("model", "gemini-3-pro-preview")
+        thinking_level = ctx.params.get("thinking_level", "high")
+        media_resolution = ctx.params.get("media_resolution", "high")
 
         try:
             # Check video size
@@ -906,7 +971,7 @@ class VideoUnderstanding(foo.Operator):
 
             # Analyze video
             api_key = ctx.secrets.get("GEMINI_API_KEY")
-            result = analyze_video(filepath, prompt, api_key, task_type)
+            result = analyze_video(filepath, prompt, api_key, task_type, model, thinking_level, media_resolution)
 
             # Store result in sample metadata
             sample = ctx.dataset[sample_id]
