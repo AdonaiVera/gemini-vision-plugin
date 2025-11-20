@@ -124,25 +124,31 @@ def save_image_to_dataset(dataset, base64_data, prompt, operation_type="generate
         raise ValueError(f"Failed to save image: {str(e)}")
 
 
-def generate_image(prompt, api_key, aspect_ratio="1:1"):
+def generate_image(prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image-preview"):
     """Generate image from text prompt using Gemini."""
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key
     }
 
+    # Gemini 3 uses uppercase modalities
+    if model.startswith("gemini-3"):
+        response_modalities = ["TEXT", "IMAGE"]
+    else:
+        response_modalities = ["Image"]
+
     payload = {
         "contents": [{
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "responseModalities": ["Image"],
+            "responseModalities": response_modalities,
             "imageConfig": {"aspectRatio": aspect_ratio}
         }
     }
 
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
     )
@@ -170,7 +176,7 @@ def generate_image(prompt, api_key, aspect_ratio="1:1"):
         raise ValueError(f"Failed to extract image: {str(e)}. Response: {content}")
 
 
-def edit_image(image_path, prompt, api_key, aspect_ratio="1:1"):
+def edit_image(image_path, prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image-preview"):
     """Edit image using text prompt."""
     headers = {
         "Content-Type": "application/json",
@@ -179,6 +185,12 @@ def edit_image(image_path, prompt, api_key, aspect_ratio="1:1"):
 
     base64_image = encode_image(image_path)
     mime_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+
+    # Gemini 3 uses uppercase modalities
+    if model.startswith("gemini-3"):
+        response_modalities = ["TEXT", "IMAGE"]
+    else:
+        response_modalities = ["Image"]
 
     payload = {
         "contents": [{
@@ -193,13 +205,13 @@ def edit_image(image_path, prompt, api_key, aspect_ratio="1:1"):
             ]
         }],
         "generationConfig": {
-            "responseModalities": ["Image"],
+            "responseModalities": response_modalities,
             "imageConfig": {"aspectRatio": aspect_ratio}
         }
     }
 
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
     )
@@ -221,7 +233,7 @@ def edit_image(image_path, prompt, api_key, aspect_ratio="1:1"):
         raise ValueError(f"Failed to extract image: {str(e)}")
 
 
-def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1"):
+def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image-preview"):
     """Compose multiple images with text prompt."""
     headers = {
         "Content-Type": "application/json",
@@ -241,16 +253,22 @@ def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1"):
 
     parts.append({"text": prompt})
 
+    # Gemini 3 uses uppercase modalities
+    if model.startswith("gemini-3"):
+        response_modalities = ["TEXT", "IMAGE"]
+    else:
+        response_modalities = ["Image"]
+
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {
-            "responseModalities": ["Image"],
+            "responseModalities": response_modalities,
             "imageConfig": {"aspectRatio": aspect_ratio}
         }
     }
 
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
     )
@@ -568,6 +586,14 @@ class TextToImage(foo.Operator):
 
         inputs.str("prompt", label="Image prompt", required=True)
 
+        inputs.enum(
+            "model",
+            values=["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
+            default="gemini-3-pro-image-preview",
+            label="Image Model",
+            description="gemini-3-pro-image-preview is Nano Banana Pro (better quality, supports 2K/4K)",
+        )
+
         has_images = len(ctx.dataset) > 0
         if has_images:
             inputs.bool(
@@ -590,6 +616,7 @@ class TextToImage(foo.Operator):
     def execute(self, ctx):
         prompt = ctx.params.get("prompt")
         use_dataset = ctx.params.get("use_dataset_size", False)
+        model = ctx.params.get("model", "gemini-3-pro-image-preview")
 
         try:
             if use_dataset and len(ctx.dataset) > 0:
@@ -601,9 +628,9 @@ class TextToImage(foo.Operator):
                 aspect_ratio = ctx.params.get("aspect_ratio", "1:1")
 
             api_key = ctx.secrets.get("GEMINI_API_KEY")
-            image_data = generate_image(prompt, api_key, aspect_ratio)
+            image_data = generate_image(prompt, api_key, aspect_ratio, model)
             filepath = save_image_to_dataset(ctx.dataset, image_data, prompt, "text_to_image")
-            return {"prompt": prompt, "filepath": filepath, "status": "success"}
+            return {"prompt": prompt, "filepath": filepath, "status": "success", "model": model}
         except Exception as e:
             return {"prompt": prompt, "status": "error", "error": str(e)}
 
@@ -668,6 +695,15 @@ class ImageEditing(foo.Operator):
             )
         else:
             inputs.str("prompt", label="Edit instruction", required=True)
+
+            inputs.enum(
+                "model",
+                values=["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
+                default="gemini-3-pro-image-preview",
+                label="Image Model",
+                description="gemini-3-pro-image-preview is Nano Banana Pro (better quality, supports 2K/4K)",
+            )
+
             inputs.bool(
                 "use_original_size",
                 default=True,
@@ -692,6 +728,7 @@ class ImageEditing(foo.Operator):
         filepath = ctx.dataset[sample_id].filepath
         prompt = ctx.params.get("prompt")
         use_original = ctx.params.get("use_original_size", True)
+        model = ctx.params.get("model", "gemini-3-pro-image-preview")
 
         try:
             if use_original:
@@ -702,9 +739,9 @@ class ImageEditing(foo.Operator):
                 aspect_ratio = ctx.params.get("aspect_ratio", "1:1")
 
             api_key = ctx.secrets.get("GEMINI_API_KEY")
-            image_data = edit_image(filepath, prompt, api_key, aspect_ratio)
+            image_data = edit_image(filepath, prompt, api_key, aspect_ratio, model)
             new_filepath = save_image_to_dataset(ctx.dataset, image_data, prompt, "image_editing")
-            return {"prompt": prompt, "filepath": new_filepath, "status": "success"}
+            return {"prompt": prompt, "filepath": new_filepath, "status": "success", "model": model}
         except Exception as e:
             return {"prompt": prompt, "status": "error", "error": str(e)}
 
@@ -770,6 +807,15 @@ class MultiImageComposition(foo.Operator):
                 )
 
             inputs.str("prompt", label="Composition instruction", required=True)
+
+            inputs.enum(
+                "model",
+                values=["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
+                default="gemini-3-pro-image-preview",
+                label="Image Model",
+                description="gemini-3-pro-image-preview is Nano Banana Pro (better quality, supports 2K/4K)",
+            )
+
             inputs.bool(
                 "use_original_size",
                 default=True,
@@ -793,6 +839,7 @@ class MultiImageComposition(foo.Operator):
         image_paths = [ctx.dataset[sample_id].filepath for sample_id in ctx.selected]
         prompt = ctx.params.get("prompt")
         use_original = ctx.params.get("use_original_size", True)
+        model = ctx.params.get("model", "gemini-3-pro-image-preview")
 
         try:
             if use_original:
@@ -803,9 +850,9 @@ class MultiImageComposition(foo.Operator):
                 aspect_ratio = ctx.params.get("aspect_ratio", "1:1")
 
             api_key = ctx.secrets.get("GEMINI_API_KEY")
-            image_data = compose_images(image_paths, prompt, api_key, aspect_ratio)
+            image_data = compose_images(image_paths, prompt, api_key, aspect_ratio, model)
             new_filepath = save_image_to_dataset(ctx.dataset, image_data, prompt, "multi_image_composition")
-            return {"prompt": prompt, "filepath": new_filepath, "status": "success", "images_used": min(len(image_paths), 3)}
+            return {"prompt": prompt, "filepath": new_filepath, "status": "success", "images_used": min(len(image_paths), 3), "model": model}
         except Exception as e:
             return {"prompt": prompt, "status": "error", "error": str(e)}
 

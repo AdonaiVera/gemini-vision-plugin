@@ -76,40 +76,37 @@ output panel. With Gemini 3.0, you get 1M token context window and enhanced reas
 ### `text_to_image`
 ![text_image-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/5eb1ce21-3cfd-4649-ba5e-24e2a035c7c4)
 
-
 Generate high-quality images from text descriptions using Gemini's image generation capabilities.
 
 Inputs:
 - `prompt`: Text description of the image to generate
+- `model`: Choose between `gemini-2.5-flash-image` or `gemini-3-pro-image-preview` (Nano Banana Pro - default, supports 2K/4K)
 - `aspect_ratio`: Choose from multiple aspect ratios (1:1, 16:9, 9:16, etc.)
 
-The generated image is automatically saved to your dataset with metadata including
-the prompt and generation type.
+The generated image is automatically saved to your dataset with metadata including the prompt and generation type.
 
 ### `image_editing`
 ![edit_image](https://github.com/user-attachments/assets/e0b6a483-fe22-464f-98f2-4d27b5cf21eb)
 
-Edit existing images using text instructions. Provide an image and use text prompts
-to add, remove, or modify elements, change the style, or adjust the color grading.
+Edit existing images using text instructions. Provide an image and use text prompts to add, remove, or modify elements, change the style, or adjust the color grading.
 
 Inputs:
 - `prompt`: Edit instruction (e.g., "add sunglasses", "change to watercolor style")
+- `model`: **NEW** - Choose between `gemini-2.5-flash-image` or `gemini-3-pro-image-preview` (Nano Banana Pro - default)
 - `aspect_ratio`: Choose from multiple aspect ratios
 
-Select exactly one image from your dataset. The edited image is automatically
-saved to your dataset with the original prompt preserved.
+Select exactly one image from your dataset. The edited image is automatically saved to your dataset with the original prompt preserved.
 
 ### `multi_image_composition`
 
-Compose a new image from multiple input images. Use multiple images to create
-a new scene or transfer the style from one image to another.
+Compose a new image from multiple input images. Use multiple images to create a new scene or transfer the style from one image to another.
 
 Inputs:
 - `prompt`: Composition instruction (e.g., "combine these in a collage", "transfer style from first to second")
+- `model`: **NEW** - Choose between `gemini-2.5-flash-image` or `gemini-3-pro-image-preview` (Nano Banana Pro - default)
 - `aspect_ratio`: Choose from multiple aspect ratios
 
-Select 2-3 images from your dataset (optimally up to 3 images). The composed
-image is automatically saved to your dataset.
+Select 2-3 images from your dataset (optimally up to 3 images). The composed image is automatically saved to your dataset.
 
 ### `video_understanding`
 ![video_describing-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/559420bd-2b08-4941-a2db-12d373eff178)
@@ -149,46 +146,3 @@ We're planning to add more exciting features:
 - **Dynamic Prompting**: Use dynamic variables per image for automated, customized generation at scale
 
 Stay tuned for updates!
-
-## Remote Zoo Model
-
-You can also use this repo as a remote model source and load a Gemini model via FiftyOne's Model Zoo API
-
-### Register and load
-
-```python
-import fiftyone as fo
-import fiftyone.zoo as foz
-import os
-
-os.environ["GEMINI_API_KEY"] = "<YOUR_KEY>"
-
-# Register the remote model source
-foz.register_zoo_model_source(
-    "https://github.com/AdonaiVera/gemini-vision-plugin",
-    overwrite=True,
-)
-
-# Load the model (Gemini remote HTTP model)
-model = foz.load_zoo_model(
-    "google/Gemini-Vision",
-    model="gemini-3-pro-preview",  # Use Gemini 3.0 with advanced reasoning
-    max_tokens=65536,  # Full 64K token output
-    max_workers=16,
-    thinking_level="high",  # NEW: Control reasoning depth (low/high)
-    media_resolution="high",  # NEW: Control media processing resolution (low/medium/high)
-)
-
-# Load a small sample dataset
-dataset = foz.load_zoo_dataset("quickstart", split="validation", max_samples=10)
-
-# Apply to a dataset (supports prompt_field for dynamic prompts)
-dataset.apply_model(
-    model,
-    prompt_field="dynamic_prompt",  # Use dynamic prompts from dataset
-    label_field="gemini_output",
-    image_field="filepath",
-)
-```
-
-See FiftyOne docs on remote models for more details: [Remote models](https://docs.voxel51.com/model_zoo/remote.html).
