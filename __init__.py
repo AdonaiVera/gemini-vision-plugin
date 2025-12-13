@@ -545,9 +545,12 @@ class QueryGeminiVision(foo.Operator):
     def resolve_output(self, ctx):
         outputs = types.Object()
         outputs.str("question", label="Question")
-        outputs.str("answer", label="Answer")
-        header = "Gemini: Chat with your images"
-        return types.Property(outputs, view=types.View(label=header))
+        outputs.str(
+            "answer",
+            label="Answer",
+            view=types.MarkdownView(),
+        )
+        return types.Property(outputs, view=types.View(label="Gemini: Chat with your images"))
 
 class TextToImage(foo.Operator):
     @property
@@ -1063,7 +1066,11 @@ class VideoUnderstanding(foo.Operator):
         outputs.str("prompt", label="Analysis Prompt")
         outputs.str("task_type", label="Analysis Type")
         outputs.str("status", label="Status")
-        outputs.str("result", label="Analysis Result")
+        outputs.str(
+            "result",
+            label="Analysis Result",
+            view=types.MarkdownView(),
+        )
         outputs.str("video_size_mb", label="Video Size (MB)")
         outputs.str("error", label="Error Details")
         return types.Property(outputs, view=types.View(label="Video Analysis Result"))
