@@ -453,6 +453,100 @@ def gemini_bbox_to_fiftyone(bbox):
     return [x, y, w, h]
 
 
+def run_spatial(image_path, api_key, prompt, model="gemini-3-pro-preview"):
+    """Detect points/keypoints using Gemini spatial understanding.
+
+    Args:
+        image_path: Path to image file
+        api_key: Gemini API key
+        prompt: User prompt describing what to detect
+        model: Gemini model to use
+
+    Returns:
+        list: List of dicts with 'point' and 'label' keys
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
+
+    base64_image = encode_image(image_path)
+    mime_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+
+    full_prompt = f"""{prompt}
+
+Return a JSON array with objects containing:
+- "point": [y, x] coordinates scaled 0-1000
+- "label": description of the point
+
+Return ONLY valid JSON array. Example:
+[{{"point": [250, 400], "label": "left eye"}}, {{"point": [250, 600], "label": "right eye"}}]"""
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": full_prompt},
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64_image,
+                    }
+                },
+            ]
+        }],
+        "generationConfig": {"maxOutputTokens": 65536},
+    }
+
+    api_version = "v1beta" if model.startswith("gemini-3") else "v1"
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent",
+        headers=headers,
+        json=payload,
+    )
+
+    content = response.json()
+    if "error" in content:
+        err = content.get("error", {})
+        raise ValueError(err.get("message") or str(err))
+
+    try:
+        text = content["candidates"][0]["content"]["parts"][0].get("text", "")
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return []
+    except Exception as e:
+        raise ValueError(f"Failed to parse spatial response: {str(e)}")
+
+
+def gemini_points_to_keypoints(points_data):
+    """Convert Gemini points to FiftyOne Keypoints.
+
+    Args:
+        points_data: List of dicts with 'point' [y, x] in 0-1000 scale
+
+    Returns:
+        list: List of fo.Keypoint objects, or empty list if invalid
+    """
+    if not points_data:
+        return []
+
+    keypoints = []
+    for item in points_data:
+        point = item.get("point", [])
+        label = item.get("label", "point")
+        if point and len(point) == 2:
+            y, x = point
+            keypoints.append(
+                fo.Keypoint(
+                    label=label,
+                    points=[(x / 1000.0, y / 1000.0)],
+                )
+            )
+
+    return keypoints
+
+
 def query_gemini_vision(ctx):
     """Queries a Google Gemini Vision model (multimodal)."""
     dataset = ctx.dataset
@@ -573,10 +667,10 @@ class QueryGeminiVision(foo.Operator):
 
         inputs.enum(
             "task",
-            values=["chat", "ocr"],
+            values=["chat", "ocr", "spatial"],
             default="chat",
             label="Task",
-            description="Chat: ask questions | OCR: extract text with bounding boxes",
+            description="Chat: ask questions | OCR: extract text | Spatial: detect points/keypoints",
         )
 
         task = ctx.params.get("task", "chat")
@@ -598,17 +692,26 @@ class QueryGeminiVision(foo.Operator):
 
         if task == "chat":
             inputs.str("query_text", label="Query", required=True)
-            inputs.int(
-                "max_tokens",
-                label="Max Tokens",
-                default=65536,
-            )
-        else:  # ocr
+            inputs.int("max_tokens", label="Max Tokens", default=65536)
+        elif task == "ocr":
             inputs.str(
                 "label_field",
                 label="Label Field",
                 default="ocr_detections",
                 description="Field name to store OCR detections",
+            )
+        else:  # spatial
+            inputs.str(
+                "query_text",
+                label="Prompt",
+                required=True,
+                description="e.g. 'Point to all human body keypoints' or 'Detect the trajectory path'",
+            )
+            inputs.str(
+                "label_field",
+                label="Label Field",
+                default="spatial_keypoints",
+                description="Field name to store keypoints",
             )
 
         return types.Property(inputs, view=form_view)
@@ -623,7 +726,7 @@ class QueryGeminiVision(foo.Operator):
 
         api_key = ctx.secrets.get("GEMINI_API_KEY")
         model = ctx.params.get("model", "gemini-3-pro-preview")
-        label_field = ctx.params.get("label_field", "ocr_detections")
+        label_field = ctx.params.get("label_field", "ocr_detections" if task == "ocr" else "spatial_keypoints")
 
         processed = 0
         errors = []
@@ -631,25 +734,33 @@ class QueryGeminiVision(foo.Operator):
         for sample_id in ctx.selected:
             sample = ctx.dataset[sample_id]
             try:
-                ocr_results = run_ocr(sample.filepath, api_key, model)
-                detections = []
-                for item in ocr_results:
-                    text = item.get("text", "")
-                    bbox = item.get("bbox", [])
-                    if bbox and len(bbox) == 4:
-                        detections.append(
-                            fo.Detection(
-                                label=text,
-                                bounding_box=gemini_bbox_to_fiftyone(bbox),
+                if task == "ocr":
+                    ocr_results = run_ocr(sample.filepath, api_key, model)
+                    detections = []
+                    for item in ocr_results:
+                        text = item.get("text", "")
+                        bbox = item.get("bbox", [])
+                        if bbox and len(bbox) == 4:
+                            detections.append(
+                                fo.Detection(
+                                    label=text,
+                                    bounding_box=gemini_bbox_to_fiftyone(bbox),
+                                )
                             )
-                        )
-                sample[label_field] = fo.Detections(detections=detections)
+                    sample[label_field] = fo.Detections(detections=detections)
+                else:  # spatial
+                    prompt = ctx.params.get("query_text", "")
+                    spatial_results = run_spatial(sample.filepath, api_key, prompt, model)
+                    keypoints = gemini_points_to_keypoints(spatial_results)
+                    sample[label_field] = fo.Keypoints(keypoints=keypoints)
+
                 sample.save()
                 processed += 1
             except Exception as e:
                 errors.append(str(e))
 
         ctx.ops.reload_dataset()
+        ctx.ops.reload_samples()
 
         return {
             "task": task,
@@ -663,12 +774,11 @@ class QueryGeminiVision(foo.Operator):
         outputs = types.Object()
         outputs.str("task", label="Task")
 
-        # Dynamic output based on task
         task = ctx.params.get("task", "chat")
         if task == "chat":
             outputs.str("question", label="Question")
             outputs.str("answer", label="Answer", view=types.MarkdownView())
-        else:
+        else:  # ocr or spatial
             outputs.int("processed", label="Processed")
             outputs.int("total", label="Total")
             outputs.str("label_field", label="Label Field")
