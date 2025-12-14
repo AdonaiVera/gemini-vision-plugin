@@ -5,8 +5,10 @@
 |
 """
 
+import json
 import os
 import io
+import re
 import tempfile
 from datetime import datetime
 
@@ -369,6 +371,88 @@ def analyze_video(video_path, prompt, api_key, task_type="describe", model="gemi
         raise ValueError(f"Failed to analyze video: {str(e)}")
 
 
+def run_ocr(image_path, api_key, model="gemini-3-pro-preview"):
+    """Extract text with bounding boxes using Gemini Vision.
+
+    Args:
+        image_path: Path to image file
+        api_key: Gemini API key
+        model: Gemini model to use
+
+    Returns:
+        list: List of dicts with 'text' and 'bbox' keys
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
+
+    base64_image = encode_image(image_path)
+    mime_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+
+    prompt = """Extract all text from this image with bounding boxes.
+For each text region, return a JSON array with objects containing:
+- "text": the extracted text
+- "bbox": [ymin, xmin, ymax, xmax] coordinates scaled 0-1000
+
+Return ONLY valid JSON array, no other text. Example:
+[{"text": "Hello World", "bbox": [100, 50, 150, 200]}]"""
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64_image,
+                    }
+                },
+            ]
+        }],
+        "generationConfig": {"maxOutputTokens": 65536},
+    }
+
+    api_version = "v1beta" if model.startswith("gemini-3") else "v1"
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent",
+        headers=headers,
+        json=payload,
+    )
+
+    content = response.json()
+    if "error" in content:
+        err = content.get("error", {})
+        raise ValueError(err.get("message") or str(err))
+
+    try:
+        text = content["candidates"][0]["content"]["parts"][0].get("text", "")
+        # Find JSON array in response
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return []
+    except Exception as e:
+        raise ValueError(f"Failed to parse OCR response: {str(e)}")
+
+
+def gemini_bbox_to_fiftyone(bbox):
+    """Convert Gemini bbox [ymin, xmin, ymax, xmax] (0-1000) to FiftyOne [x, y, w, h] (0-1).
+
+    Args:
+        bbox: List of [ymin, xmin, ymax, xmax] in 0-1000 scale
+
+    Returns:
+        list: [x, y, width, height] normalized to 0-1
+    """
+    ymin, xmin, ymax, xmax = bbox
+    x = xmin / 1000.0
+    y = ymin / 1000.0
+    w = (xmax - xmin) / 1000.0
+    h = (ymax - ymin) / 1000.0
+    return [x, y, w, h]
+
+
 def query_gemini_vision(ctx):
     """Queries a Google Gemini Vision model (multimodal)."""
     dataset = ctx.dataset
@@ -437,7 +521,7 @@ class QueryGeminiVision(foo.Operator):
     def config(self):
         _config = foo.OperatorConfig(
             name="query_gemini_vision",
-            label="Gemini: Chat with your images!",
+            label="Gemini: Vision Tasks",
             dynamic=True,
         )
         _config.icon = "/assets/icon_dark.svg"
@@ -460,97 +544,137 @@ class QueryGeminiVision(foo.Operator):
     def resolve_input(self, ctx):
         inputs = types.Object()
         form_view = types.View(
-            label="Gemini",
-            description="Ask a question about the selected image!",
+            label="Gemini Vision",
+            description="Run vision tasks on selected images",
         )
 
-        gemini_flag = allows_gemini_models(ctx)
-        if not gemini_flag:
+        if not allows_gemini_models(ctx):
             inputs.message(
                 "no_gemini_key",
-                label=(
-                    "No Gemini API Key. Please set GEMINI_API_KEY in your environment."
-                ),
+                label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
             )
-            return types.Property(inputs)
+            return types.Property(inputs, view=form_view)
 
         num_selected = len(ctx.selected)
         if num_selected == 0:
             inputs.str(
                 "no_sample_warning",
+                view=types.Warning(label="You must select a sample to use this operator"),
+            )
+            return types.Property(inputs, view=form_view)
+
+        if num_selected > 10:
+            inputs.str(
+                "many_samples_warning",
                 view=types.Warning(
-                    label=f"You must select a sample to use this operator"
+                    label=f"You have {num_selected} samples selected. Gemini may charge per image.",
                 ),
             )
-        else:
-            if num_selected > 10:
-                inputs.str(
-                    "many_samples_warning",
-                    view=types.Warning(
-                        label=(
-                            f"You have {num_selected} samples selected. Gemini may charge"
-                            " per image. Are you sure you want to continue?"
-                        ),
-                    ),
-                )
 
-            inputs.str(
-                "query_text", label="Query about your images", required=True
-            )
-            # Populate model dropdown from live list; fall back to text if unavailable
-            api_key = ctx.secrets.get("GEMINI_API_KEY")
-            model_choices = list_gemini_models(api_key) if api_key else []
-            default_model = "gemini-3-pro-preview"
-            if model_choices:
-                inputs.enum(
-                    "model",
-                    values=model_choices,
-                    default=default_model if default_model in model_choices else model_choices[0],
-                    label="Model",
-                    description="Select a Gemini model",
-                )
-            else:
-                inputs.str(
-                    "model",
-                    label="Model",
-                    default=default_model,
-                    description="The Gemini model to use (e.g., gemini-3-pro-preview)",
-                )
-
-            inputs.enum(
-                "thinking_level",
-                values=["low", "high"],
-                default="high",
-                label="Thinking Level",
-                description="Reasoning depth: 'low' minimizes latency/cost, 'high' maximizes reasoning (Gemini 3.0 only)",
-            )
-
-        inputs.int(
-            "max_tokens",
-            label="Max output tokens",
-            default=65536,
-            description=(
-                "The maximum number of output tokens (64K). Gemini 3.0 supports full 64K token output."
-            ),
-            view=types.FieldView(),
+        inputs.enum(
+            "task",
+            values=["chat", "ocr"],
+            default="chat",
+            label="Task",
+            description="Chat: ask questions | OCR: extract text with bounding boxes",
         )
+
+        task = ctx.params.get("task", "chat")
+
+        # Model selector
+        api_key = ctx.secrets.get("GEMINI_API_KEY")
+        model_choices = list_gemini_models(api_key) if api_key else []
+        default_model = "gemini-3-pro-preview"
+
+        if model_choices:
+            inputs.enum(
+                "model",
+                values=model_choices,
+                default=default_model if default_model in model_choices else model_choices[0],
+                label="Model",
+            )
+        else:
+            inputs.str("model", label="Model", default=default_model)
+
+        if task == "chat":
+            inputs.str("query_text", label="Query", required=True)
+            inputs.int(
+                "max_tokens",
+                label="Max Tokens",
+                default=65536,
+            )
+        else:  # ocr
+            inputs.str(
+                "label_field",
+                label="Label Field",
+                default="ocr_detections",
+                description="Field name to store OCR detections",
+            )
 
         return types.Property(inputs, view=form_view)
 
     def execute(self, ctx):
-        question = ctx.params.get("query_text", None)
-        answer = query_gemini_vision(ctx)
-        return {"question": question, "answer": answer}
+        task = ctx.params.get("task", "chat")
+
+        if task == "chat":
+            question = ctx.params.get("query_text", None)
+            answer = query_gemini_vision(ctx)
+            return {"task": task, "question": question, "answer": answer}
+
+        api_key = ctx.secrets.get("GEMINI_API_KEY")
+        model = ctx.params.get("model", "gemini-3-pro-preview")
+        label_field = ctx.params.get("label_field", "ocr_detections")
+
+        processed = 0
+        errors = []
+
+        for sample_id in ctx.selected:
+            sample = ctx.dataset[sample_id]
+            try:
+                ocr_results = run_ocr(sample.filepath, api_key, model)
+                detections = []
+                for item in ocr_results:
+                    text = item.get("text", "")
+                    bbox = item.get("bbox", [])
+                    if bbox and len(bbox) == 4:
+                        detections.append(
+                            fo.Detection(
+                                label=text,
+                                bounding_box=gemini_bbox_to_fiftyone(bbox),
+                            )
+                        )
+                sample[label_field] = fo.Detections(detections=detections)
+                sample.save()
+                processed += 1
+            except Exception as e:
+                errors.append(str(e))
+
+        ctx.ops.reload_dataset()
+
+        return {
+            "task": task,
+            "processed": processed,
+            "total": len(ctx.selected),
+            "label_field": label_field,
+            "errors": "; ".join(errors) if errors else None,
+        }
 
     def resolve_output(self, ctx):
         outputs = types.Object()
-        outputs.str("question", label="Question")
-        outputs.str(
-            "answer",
-            label="Answer",
-            view=types.MarkdownView(),
-        )
-        return types.Property(outputs, view=types.View(label="Gemini: Chat with your images"))
+        outputs.str("task", label="Task")
+
+        # Dynamic output based on task
+        task = ctx.params.get("task", "chat")
+        if task == "chat":
+            outputs.str("question", label="Question")
+            outputs.str("answer", label="Answer", view=types.MarkdownView())
+        else:
+            outputs.int("processed", label="Processed")
+            outputs.int("total", label="Total")
+            outputs.str("label_field", label="Label Field")
+            outputs.str("errors", label="Errors")
+
+        return types.Property(outputs, view=types.View(label="Gemini Vision Results"))
 
 class TextToImage(foo.Operator):
     @property
