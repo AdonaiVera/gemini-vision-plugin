@@ -63,17 +63,20 @@ session = fo.launch_app(dataset)
 Multi-task vision operator with three modes:
 
 #### Chat
-![first_video-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/17d0afd7-5aeb-413b-815a-0f8b04628da6)
+![question_answer_gemini-ezgif com-optiwebp](https://github.com/user-attachments/assets/48dce8da-fcca-443a-8398-a51020d4b125)
+
 
 Ask questions about your images. Supports up to 64K output tokens with Gemini 3.0.
 
 #### OCR
-![ocr_gemini](https://cdn.voxel51.com/tutorial_gemini_vision/ocr_gemini.webp)
+![ocr_gemini](https://github.com/user-attachments/assets/c1b3eb6a-6d08-415f-91e1-6ab1dc6b6f0f)
+
 
 Extract text with bounding boxes. Results stored as `fo.Detections`.
 
 #### Spatial
-![pointing](https://cdn.voxel51.com/tutorial_gemini_vision/pointing.webp)
+![pointing](https://github.com/user-attachments/assets/8a5bf159-2e90-433e-a13d-cac5bab796d2)
+
 
 Detect points/keypoints (e.g., pose estimation, object pointing). Results stored as `fo.Keypoints`.
 
