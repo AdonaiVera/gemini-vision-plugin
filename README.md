@@ -59,19 +59,29 @@ session = fo.launch_app(dataset)
 ## Operators
 
 ### `query_gemini_vision`
+
+Multi-task vision operator with three modes:
+
+#### Chat
 ![first_video-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/17d0afd7-5aeb-413b-815a-0f8b04628da6)
 
-Chat with your images using Gemini Vision models.
+Ask questions about your images. Supports up to 64K output tokens with Gemini 3.0.
 
-Inputs:
-- `query_text`: The text to prompt Gemini with
-- `model`: Select from available Gemini models (default: `gemini-3-pro-preview`)
-- `thinking_level`: **NEW in Gemini 3.0** - Control reasoning depth (`low` for speed/cost, `high` for complex reasoning)
-- `max_tokens`: The maximum number of output tokens to generate (up to 64K with Gemini 3.0)
+#### OCR
+![ocr_gemini](https://cdn.voxel51.com/tutorial_gemini_vision/ocr_gemini.webp)
 
-The operator encodes all selected images and sends them along with your text
-prompt to the Gemini Vision API. The model's text response is displayed in the
-output panel. With Gemini 3.0, you get 1M token context window and enhanced reasoning!
+Extract text with bounding boxes. Results stored as `fo.Detections`.
+
+#### Spatial
+![pointing](https://cdn.voxel51.com/tutorial_gemini_vision/pointing.webp)
+
+Detect points/keypoints (e.g., pose estimation, object pointing). Results stored as `fo.Keypoints`.
+
+**Inputs:**
+- `task`: Select mode (`chat`, `ocr`, `spatial`)
+- `model`: Gemini model (default: `gemini-3-pro-preview`)
+- `query_text`: Prompt for chat/spatial tasks
+- `label_field`: Field name to store OCR/spatial results
 
 ### `text_to_image`
 ![text_image-ezgif com-video-to-webp-converter](https://github.com/user-attachments/assets/5eb1ce21-3cfd-4649-ba5e-24e2a035c7c4)
