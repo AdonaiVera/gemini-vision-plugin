@@ -10,7 +10,7 @@ import numpy as np
 class GeminiRemoteModel(SamplesMixin, Model):
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "gemini-3-pro-preview")
+        self.model = config.get("model", "gemini-3.1-pro-preview")
         self.max_tokens = int(config.get("max_tokens", 65536))
         self.thinking_level = config.get("thinking_level", "high")
         self.media_resolution = config.get("media_resolution", "high")
@@ -25,7 +25,6 @@ class GeminiRemoteModel(SamplesMixin, Model):
     @property
     def media_type(self):
         """Returns the media type for the model."""
-        # TODO: add support for other media types (VIDEO, AUDIO, etc.)
         return "image"
 
     @property
@@ -115,8 +114,7 @@ class GeminiRemoteModel(SamplesMixin, Model):
             image = Image.fromarray(image).convert("RGB")
         elif not isinstance(image, Image.Image):
             raise ValueError("Unsupported image type for predict()")
-        
-        # Do the actual inference
+
         prompt = self._resolve_prompt(sample)
         b64, mime_type = self._encode_pil(image)
         parts = [

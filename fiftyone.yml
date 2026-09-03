@@ -1,14 +1,20 @@
 fiftyone:
   version: ">=0.22.0"
 name: "@adonaivera/gemini_vision"
-version: "1.0.0"
-description: "Use Google Gemini Vision to chat with images in your dataset!"
-url: "https://ai.google.dev/gemini-api"
+version: "2.1.0"
+description: "Gemini in FiftyOne: agentic video understanding, video generation with Omni, image Q&A, OCR, spatial pointing, and image generation"
+url: "https://github.com/AdonaiVera/gemini-vision-plugin"
 operators:
   - query_gemini_vision
   - text_to_image
   - image_editing
   - multi_image_composition
   - video_understanding
+  - video_generation
+skills:
+  - gemini-video-understanding
+  - gemini-video-generation
+  - gemini-image-analysis
+  - gemini-image-generation
 secrets:
-  - GEMINI_API_KEY 
+  - GEMINI_API_KEY

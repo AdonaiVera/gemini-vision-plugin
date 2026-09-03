@@ -7,15 +7,16 @@
 
 import json
 import os
-import io
 import re
-import tempfile
-from datetime import datetime
+import time
 
 import fiftyone.operators as foo
 from fiftyone.operators import types
 import fiftyone as fo
-import fiftyone.core.utils as fou
+
+from . import gemini_media as gm
+from . import gemini_video as gv
+from . import gemini_video_gen as gvg
 
 import base64
 import requests
@@ -30,18 +31,6 @@ def allows_gemini_models(ctx):
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
-
-
-def encode_video(video_path):
-    """Encode video file to base64."""
-    with open(video_path, "rb") as video_file:
-        return base64.b64encode(video_file.read()).decode("utf-8")
-
-
-def get_video_size_mb(video_path):
-    """Get video file size in MB."""
-    size_bytes = os.path.getsize(video_path)
-    return size_bytes / (1024 * 1024)
 
 
 def get_closest_aspect_ratio(width, height):
@@ -64,13 +53,19 @@ def get_closest_aspect_ratio(width, height):
     return closest_ratio[0]
 
 
-def list_gemini_models(api_key):
-    """Returns a list of available Gemini model ids that support generateContent.
+REQUEST_TIMEOUT = 300
 
-    Model ids are returned without the leading "models/" prefix for convenient use
-    in the v1 models endpoint path.
-    """
-    manual_models = ["gemini-3-pro-preview"]
+_MODEL_CACHE = {}
+_MODEL_CACHE_TTL = 300
+
+
+def list_gemini_models(api_key):
+    """Returns a list of available Gemini model ids that support generateContent."""
+    manual_models = ["gemini-3.1-pro-preview"]
+
+    cached = _MODEL_CACHE.get(api_key)
+    if cached is not None and time.time() - cached[0] < _MODEL_CACHE_TTL:
+        return cached[1]
 
     try:
         headers = {"x-goog-api-key": api_key}
@@ -90,31 +85,165 @@ def list_gemini_models(api_key):
         all_models = set(manual_models + models)
 
         def sort_key(model):
-            if model.startswith("gemini-3"):
-                return (0, model)
-            elif model.startswith("gemini-2"):
-                return (1, model)
-            else:
-                return (2, model)
+            match = re.match(r"gemini-(\d+)(?:\.(\d+))?", model)
+            if match is None:
+                return (1, 0, 0, model)
 
-        return sorted(all_models, key=sort_key)
+            return (0, -int(match.group(1)), -int(match.group(2) or 0), model)
+
+        models = sorted(all_models, key=sort_key)
+        _MODEL_CACHE[api_key] = (time.time(), models)
+        return models
     except Exception:
         return manual_models
 
 
+VIDEO_TASK_ORDER = [
+    (name, gv.VIDEO_TASKS[name])
+    for name in (
+        "describe",
+        "state_change",
+        "anomaly",
+        "needle",
+        "count",
+        "frame_extract",
+        "chapters",
+        "cause_effect",
+        "qa",
+        "transcript",
+    )
+]
+
+_DEFAULT_PROMPTS = {
+    task["default_prompt"] for _, task in VIDEO_TASK_ORDER if task["default_prompt"]
+}
+
+
+def _is_stale_prompt(prompt, task):
+    """Returns whether ``prompt`` is a different task's leftover default."""
+    if not task["prompt_required"]:
+        return False
+
+    prompt = (prompt or "").strip()
+    return bool(prompt) and prompt in _DEFAULT_PROMPTS - {task["default_prompt"]}
+
+_PROMPT_HELP = {
+    "describe": "Optional — steer the description toward what you care about",
+    "state_change": "Optional — narrow the search, e.g. 'only the robot arm'",
+    "anomaly": "Optional — describe what 'normal' looks like for this footage",
+    "needle": "Required — describe exactly what to find, e.g. 'a red forklift'",
+    "count": "Required — what to count, e.g. 'how many times the door opens'",
+    "frame_extract": "Optional — e.g. 'one sharp frame per person who appears'",
+    "chapters": "Optional — e.g. 'chapter per surgical step'",
+    "cause_effect": "Required — e.g. 'why did the stack of boxes fall over?'",
+    "qa": "Required — your question about the video",
+    "transcript": "Optional — e.g. 'only transcribe the instructor'",
+}
+
+
+def list_video_models(api_key):
+    """Returns the available Gemini models that support agentic video.
+
+    Args:
+        api_key: a Gemini API key
+
+    Returns:
+        a list of model ids
+    """
+    available = set(list_gemini_models(api_key))
+    models = [m for m in gv.AGENTIC_VIDEO_MODELS if m in available]
+    return models or list(gv.AGENTIC_VIDEO_MODELS)
+
+
+def _resolve_video_targets(ctx):
+    """Resolves which videos to analyze from the App's selection.
+
+    Args:
+        ctx: the operator :class:`fiftyone.operators.executor.ExecutionContext`
+
+    Returns:
+        a ``(targets, error)`` tuple, where ``targets`` is a list of
+        ``(sample_id, sample)`` and ``error`` is a message or ``None``
+    """
+    if ctx.dataset is None:
+        return [], "No dataset is loaded"
+
+    selected = list(ctx.selected)
+    if not selected:
+        return [], "Select one or more videos to analyze."
+
+    max_videos = int(ctx.params.get("max_videos") or 5)
+    if len(selected) > max_videos:
+        return [], (
+            f"{len(selected)} videos selected, above the limit of "
+            f"{max_videos}. Select fewer, or raise Max videos — Gemini bills "
+            "per video."
+        )
+
+    targets = []
+    for sample_id in selected:
+        sample = ctx.dataset[sample_id]
+        if sample.media_type != "video":
+            return [], (
+                f"'{os.path.basename(sample.filepath)}' is a "
+                f"{sample.media_type}, not a video."
+            )
+
+        targets.append((sample_id, sample))
+
+    return targets, None
+
+
+def _render_result(result, filename=None, field=None):
+    """Renders one analysis result as Markdown for the operator output.
+
+    Args:
+        result: a :func:`gemini_video.run_interaction` result
+        filename (None): the video's basename, when more than one was analyzed
+        field (None): the sample field the answer was saved to
+    """
+    _, task = gv.resolve_task(result["task"])
+
+    parts = []
+    if filename:
+        parts.append(f"**{filename}**")
+
+    data = result.get("data")
+    if data is None or not task["events_key"]:
+        parts.append(result["text"])
+    else:
+        if data.get("summary"):
+            parts.append(str(data["summary"]))
+        if data.get("total") is not None:
+            parts.append(f"**Total: {data['total']}**")
+        if data.get("counting_rule"):
+            parts.append(f"_Counting rule: {data['counting_rule']}_")
+        if data.get("found") is False:
+            parts.append("_Target not found in this video._")
+        parts.append(gv.format_events_markdown(data.get(task["events_key"])))
+
+    usage = result["usage"]
+    meta = [
+        result["model"],
+        f"{result['processing_calls']} agentic video lookups",
+        f"{usage.get('total_tokens')} tokens",
+    ]
+    if field:
+        meta.append(f"saved to `{field}`")
+    parts.append("_" + " · ".join(meta) + "_")
+
+    return "\n\n".join(p for p in parts if p)
+
+
 def save_image_to_dataset(dataset, base64_data, prompt, operation_type="generated"):
-    """Save generated image to the dataset."""
+    """Saves a generated image beside the dataset's media and adds a sample."""
     try:
         img_data = base64.b64decode(base64_data)
-        img = Image.open(io.BytesIO(img_data))
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{operation_type}_{timestamp}.png"
-
-        dataset_dir = os.path.dirname(dataset.first().filepath) if len(dataset) > 0 else tempfile.gettempdir()
-        filepath = os.path.join(dataset_dir, filename)
-
-        img.save(filepath, "PNG")
+        filepath = gm.output_path(
+            gm.media_root(dataset), operation_type, "png"
+        )
+        gm.write_media(img_data, filepath)
 
         sample = fo.Sample(filepath=filepath)
         sample["prompt"] = prompt
@@ -126,14 +255,13 @@ def save_image_to_dataset(dataset, base64_data, prompt, operation_type="generate
         raise ValueError(f"Failed to save image: {str(e)}")
 
 
-def generate_image(prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image-preview"):
+def generate_image(prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image"):
     """Generate image from text prompt using Gemini."""
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key
     }
 
-    # Gemini 3 uses uppercase modalities
     if model.startswith("gemini-3"):
         response_modalities = ["TEXT", "IMAGE"]
     else:
@@ -153,6 +281,7 @@ def generate_image(prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-imag
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
+        timeout=REQUEST_TIMEOUT,
     )
 
     content = response.json()
@@ -178,7 +307,7 @@ def generate_image(prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-imag
         raise ValueError(f"Failed to extract image: {str(e)}. Response: {content}")
 
 
-def edit_image(image_path, prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image-preview"):
+def edit_image(image_path, prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image"):
     """Edit image using text prompt."""
     headers = {
         "Content-Type": "application/json",
@@ -188,7 +317,6 @@ def edit_image(image_path, prompt, api_key, aspect_ratio="1:1", model="gemini-3-
     base64_image = encode_image(image_path)
     mime_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
 
-    # Gemini 3 uses uppercase modalities
     if model.startswith("gemini-3"):
         response_modalities = ["TEXT", "IMAGE"]
     else:
@@ -216,6 +344,7 @@ def edit_image(image_path, prompt, api_key, aspect_ratio="1:1", model="gemini-3-
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
+        timeout=REQUEST_TIMEOUT,
     )
 
     content = response.json()
@@ -235,7 +364,7 @@ def edit_image(image_path, prompt, api_key, aspect_ratio="1:1", model="gemini-3-
         raise ValueError(f"Failed to extract image: {str(e)}")
 
 
-def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image-preview"):
+def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1", model="gemini-3-pro-image"):
     """Compose multiple images with text prompt."""
     headers = {
         "Content-Type": "application/json",
@@ -255,7 +384,6 @@ def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1", model="gemi
 
     parts.append({"text": prompt})
 
-    # Gemini 3 uses uppercase modalities
     if model.startswith("gemini-3"):
         response_modalities = ["TEXT", "IMAGE"]
     else:
@@ -273,6 +401,7 @@ def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1", model="gemi
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers=headers,
         json=payload,
+        timeout=REQUEST_TIMEOUT,
     )
 
     content = response.json()
@@ -292,86 +421,7 @@ def compose_images(image_paths, prompt, api_key, aspect_ratio="1:1", model="gemi
         raise ValueError(f"Failed to extract image: {str(e)}")
 
 
-def analyze_video(video_path, prompt, api_key, task_type="describe", model="gemini-3-pro-preview", thinking_level="high", media_resolution="high"):
-    """Analyze video using Gemini Vision API.
-
-    Args:
-        video_path: Path to video file
-        prompt: User prompt for video analysis
-        task_type: Type of analysis (describe, segment, extract, question)
-        model: Gemini model to use (default: gemini-3-pro-preview)
-        thinking_level: Reasoning depth for Gemini 3.0 (low/high)
-        media_resolution: Video frame resolution (low/medium/high)
-    """
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key
-    }
-
-    # Get video mime type
-    video_ext = video_path.lower().split('.')[-1]
-    mime_type_map = {
-        'mp4': 'video/mp4',
-        'mpeg': 'video/mpeg',
-        'mov': 'video/mov',
-        'avi': 'video/avi',
-        'flv': 'video/x-flv',
-        'mpg': 'video/mpg',
-        'webm': 'video/webm',
-        'wmv': 'video/wmv',
-        '3gp': 'video/3gpp',
-    }
-    mime_type = mime_type_map.get(video_ext, 'video/mp4')
-
-    # Encode video
-    base64_video = encode_video(video_path)
-
-    # Build payload
-    payload = {
-        "contents": [{
-            "parts": [
-                {
-                    "inline_data": {
-                        "mime_type": mime_type,
-                        "data": base64_video
-                    }
-                },
-                {"text": prompt}
-            ]
-        }],
-        "generationConfig": {}
-    }
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers=headers,
-        json=payload,
-    )
-
-    content = response.json()
-    if "error" in content:
-        err = content.get("error", {})
-        raise ValueError(err.get("message") or str(err))
-
-    try:
-        candidates = content.get("candidates", [])
-        if not candidates:
-            raise ValueError("No candidates in response")
-
-        parts = candidates[0]["content"]["parts"]
-        response_text = ""
-        for part in parts:
-            if "text" in part:
-                response_text += part["text"]
-
-        if not response_text:
-            raise ValueError("No text response from model")
-
-        return response_text
-    except Exception as e:
-        raise ValueError(f"Failed to analyze video: {str(e)}")
-
-
-def run_ocr(image_path, api_key, model="gemini-3-pro-preview"):
+def run_ocr(image_path, api_key, model="gemini-3.1-pro-preview"):
     """Extract text with bounding boxes using Gemini Vision.
 
     Args:
@@ -418,6 +468,7 @@ Return ONLY valid JSON array, no other text. Example:
         f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent",
         headers=headers,
         json=payload,
+        timeout=REQUEST_TIMEOUT,
     )
 
     content = response.json()
@@ -427,7 +478,6 @@ Return ONLY valid JSON array, no other text. Example:
 
     try:
         text = content["candidates"][0]["content"]["parts"][0].get("text", "")
-        # Find JSON array in response
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match:
             return json.loads(match.group())
@@ -453,7 +503,7 @@ def gemini_bbox_to_fiftyone(bbox):
     return [x, y, w, h]
 
 
-def run_spatial(image_path, api_key, prompt, model="gemini-3-pro-preview"):
+def run_spatial(image_path, api_key, prompt, model="gemini-3.1-pro-preview"):
     """Detect points/keypoints using Gemini spatial understanding.
 
     Args:
@@ -502,6 +552,7 @@ Return ONLY valid JSON array. Example:
         f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent",
         headers=headers,
         json=payload,
+        timeout=REQUEST_TIMEOUT,
     )
 
     content = response.json()
@@ -553,14 +604,14 @@ def query_gemini_vision(ctx):
     sample_ids = ctx.selected
     query_text = ctx.params.get("query_text", None)
     max_tokens = ctx.params.get("max_tokens", 65536)
-    model_name = ctx.params.get("model", "gemini-3-pro-preview")
+    model_name = ctx.params.get("model", "gemini-3.1-pro-preview")
     thinking_level = ctx.params.get("thinking_level", "high")
 
     parts = []
     if query_text:
         parts.append({"text": query_text})
     for sample_id in sample_ids:
-        filepath = dataset[sample_id].filepath
+        filepath = gm.localize(dataset[sample_id])
         base64_image = encode_image(filepath)
         mime_type = "image/jpeg"
         if filepath.lower().endswith(".png"):
@@ -594,6 +645,7 @@ def query_gemini_vision(ctx):
         f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent",
         headers=headers,
         json=payload,
+        timeout=REQUEST_TIMEOUT,
     )
 
     content = response.json()
@@ -675,10 +727,9 @@ class QueryGeminiVision(foo.Operator):
 
         task = ctx.params.get("task", "chat")
 
-        # Model selector
         api_key = ctx.secrets.get("GEMINI_API_KEY")
         model_choices = list_gemini_models(api_key) if api_key else []
-        default_model = "gemini-3-pro-preview"
+        default_model = "gemini-3.1-pro-preview"
 
         if model_choices:
             inputs.enum(
@@ -700,7 +751,7 @@ class QueryGeminiVision(foo.Operator):
                 default="ocr_detections",
                 description="Field name to store OCR detections",
             )
-        else:  # spatial
+        elif task == "spatial":
             inputs.str(
                 "query_text",
                 label="Prompt",
@@ -722,10 +773,15 @@ class QueryGeminiVision(foo.Operator):
         if task == "chat":
             question = ctx.params.get("query_text", None)
             answer = query_gemini_vision(ctx)
-            return {"task": task, "question": question, "answer": answer}
+            return {
+                "status": "success",
+                "task": task,
+                "question": question,
+                "answer": answer,
+            }
 
         api_key = ctx.secrets.get("GEMINI_API_KEY")
-        model = ctx.params.get("model", "gemini-3-pro-preview")
+        model = ctx.params.get("model", "gemini-3.1-pro-preview")
         label_field = ctx.params.get("label_field", "ocr_detections" if task == "ocr" else "spatial_keypoints")
 
         processed = 0
@@ -735,7 +791,7 @@ class QueryGeminiVision(foo.Operator):
             sample = ctx.dataset[sample_id]
             try:
                 if task == "ocr":
-                    ocr_results = run_ocr(sample.filepath, api_key, model)
+                    ocr_results = run_ocr(gm.localize(sample), api_key, model)
                     detections = []
                     for item in ocr_results:
                         text = item.get("text", "")
@@ -748,9 +804,11 @@ class QueryGeminiVision(foo.Operator):
                                 )
                             )
                     sample[label_field] = fo.Detections(detections=detections)
-                else:  # spatial
+                elif task == "spatial":
                     prompt = ctx.params.get("query_text", "")
-                    spatial_results = run_spatial(sample.filepath, api_key, prompt, model)
+                    spatial_results = run_spatial(
+                        gm.localize(sample), api_key, prompt, model
+                    )
                     keypoints = gemini_points_to_keypoints(spatial_results)
                     sample[label_field] = fo.Keypoints(keypoints=keypoints)
 
@@ -763,6 +821,7 @@ class QueryGeminiVision(foo.Operator):
         ctx.ops.reload_samples()
 
         return {
+            "status": "success" if processed else "error",
             "task": task,
             "processed": processed,
             "total": len(ctx.selected),
@@ -773,12 +832,13 @@ class QueryGeminiVision(foo.Operator):
     def resolve_output(self, ctx):
         outputs = types.Object()
         outputs.str("task", label="Task")
+        outputs.str("status", label="Status")
 
         task = ctx.params.get("task", "chat")
         if task == "chat":
             outputs.str("question", label="Question")
             outputs.str("answer", label="Answer", view=types.MarkdownView())
-        else:  # ocr or spatial
+        else:
             outputs.int("processed", label="Processed")
             outputs.int("total", label="Total")
             outputs.str("label_field", label="Label Field")
@@ -825,10 +885,10 @@ class TextToImage(foo.Operator):
 
         inputs.enum(
             "model",
-            values=["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
-            default="gemini-3-pro-image-preview",
+            values=["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"],
+            default="gemini-3-pro-image",
             label="Image Model",
-            description="gemini-3-pro-image-preview is Nano Banana Pro (better quality, supports 2K/4K)",
+            description="gemini-3-pro-image is Nano Banana Pro (best quality, supports 2K/4K); gemini-3.1-flash-image is the fast tier",
         )
 
         has_images = len(ctx.dataset) > 0
@@ -853,12 +913,12 @@ class TextToImage(foo.Operator):
     def execute(self, ctx):
         prompt = ctx.params.get("prompt")
         use_dataset = ctx.params.get("use_dataset_size", False)
-        model = ctx.params.get("model", "gemini-3-pro-image-preview")
+        model = ctx.params.get("model", "gemini-3-pro-image")
 
         try:
             if use_dataset and len(ctx.dataset) > 0:
                 sample = ctx.dataset.first()
-                img = Image.open(sample.filepath)
+                img = Image.open(gm.localize(sample))
                 width, height = img.size
                 aspect_ratio = get_closest_aspect_ratio(width, height)
             else:
@@ -935,10 +995,10 @@ class ImageEditing(foo.Operator):
 
             inputs.enum(
                 "model",
-                values=["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
-                default="gemini-3-pro-image-preview",
+                values=["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"],
+                default="gemini-3-pro-image",
                 label="Image Model",
-                description="gemini-3-pro-image-preview is Nano Banana Pro (better quality, supports 2K/4K)",
+                description="gemini-3-pro-image is Nano Banana Pro (best quality, supports 2K/4K); gemini-3.1-flash-image is the fast tier",
             )
 
             inputs.bool(
@@ -962,10 +1022,10 @@ class ImageEditing(foo.Operator):
             return {"status": "error", "error": "Please select exactly one image"}
 
         sample_id = ctx.selected[0]
-        filepath = ctx.dataset[sample_id].filepath
+        filepath = gm.localize(ctx.dataset[sample_id])
         prompt = ctx.params.get("prompt")
         use_original = ctx.params.get("use_original_size", True)
-        model = ctx.params.get("model", "gemini-3-pro-image-preview")
+        model = ctx.params.get("model", "gemini-3-pro-image")
 
         try:
             if use_original:
@@ -1047,10 +1107,10 @@ class MultiImageComposition(foo.Operator):
 
             inputs.enum(
                 "model",
-                values=["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
-                default="gemini-3-pro-image-preview",
+                values=["gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"],
+                default="gemini-3-pro-image",
                 label="Image Model",
-                description="gemini-3-pro-image-preview is Nano Banana Pro (better quality, supports 2K/4K)",
+                description="gemini-3-pro-image is Nano Banana Pro (best quality, supports 2K/4K); gemini-3.1-flash-image is the fast tier",
             )
 
             inputs.bool(
@@ -1073,10 +1133,12 @@ class MultiImageComposition(foo.Operator):
         if len(ctx.selected) < 2:
             return {"status": "error", "error": "Please select at least 2 images"}
 
-        image_paths = [ctx.dataset[sample_id].filepath for sample_id in ctx.selected]
+        image_paths = [
+            gm.localize(ctx.dataset[sample_id]) for sample_id in ctx.selected
+        ]
         prompt = ctx.params.get("prompt")
         use_original = ctx.params.get("use_original_size", True)
-        model = ctx.params.get("model", "gemini-3-pro-image-preview")
+        model = ctx.params.get("model", "gemini-3-pro-image")
 
         try:
             if use_original:
@@ -1109,7 +1171,15 @@ class VideoUnderstanding(foo.Operator):
         _config = foo.OperatorConfig(
             name="video_understanding",
             label="Gemini: Analyze Video",
+            description=(
+                "Agentic video understanding — state changes, anomalies, "
+                "counting, needle-in-a-haystack search, keyframe extraction "
+                "and causal Q&A, written back as temporal detections"
+            ),
             dynamic=True,
+            allow_immediate_execution=True,
+            allow_delegated_execution=True,
+            default_choice_to_delegated=False,
         )
         _config.icon = "/assets/icon_video.svg"
         return _config
@@ -1127,8 +1197,11 @@ class VideoUnderstanding(foo.Operator):
     def resolve_input(self, ctx):
         inputs = types.Object()
         form_view = types.View(
-            label="Video Understanding",
-            description="Analyze video content using Gemini Vision",
+            label="Agentic Video Understanding",
+            description=(
+                "Gemini navigates the timeline itself — searching, scanning "
+                "and re-sampling only the segments your prompt needs"
+            ),
         )
 
         if not allows_gemini_models(ctx):
@@ -1136,178 +1209,665 @@ class VideoUnderstanding(foo.Operator):
                 "no_gemini_key",
                 label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
             )
-            return types.Property(inputs)
+            return types.Property(inputs, view=form_view)
 
-        num_selected = len(ctx.selected)
-        if num_selected == 0:
+        source = ctx.params.get("source", "selected")
+        inputs.enum(
+            "source",
+            values=["selected", "youtube"],
+            default="selected",
+            label="Video source",
+            description="Analyze selected samples, or a public YouTube URL",
+            view=types.RadioGroup(),
+        )
+
+        if source == "youtube":
             inputs.str(
-                "no_sample_warning",
-                view=types.Warning(
-                    label="You must select exactly one video to analyze"
-                ),
-            )
-        elif num_selected > 1:
-            inputs.str(
-                "multiple_samples_warning",
-                view=types.Warning(
-                    label=f"Please select only one video. You have {num_selected} selected."
-                ),
+                "youtube_url",
+                label="YouTube URL",
+                required=True,
+                description="A public YouTube video URL",
             )
         else:
-            # Check if selected sample is a video and within size limit
-            sample_id = ctx.selected[0]
-            filepath = ctx.dataset[sample_id].filepath
-
-            # Check file size
-            try:
-                video_size_mb = get_video_size_mb(filepath)
-                if video_size_mb > 20:
-                    inputs.str(
-                        "size_warning",
-                        view=types.Error(
-                            label=f"Video is too large ({video_size_mb:.1f}MB). Maximum size is 20MB for inline video analysis."
-                        ),
-                    )
-                    return types.Property(inputs, view=form_view)
-            except Exception as e:
-                inputs.str(
-                    "error_warning",
-                    view=types.Error(
-                        label=f"Error checking video file: {str(e)}"
-                    ),
+            targets, error = _resolve_video_targets(ctx)
+            if error is not None:
+                prop = inputs.str(
+                    "target_error", view=types.Warning(label=error)
                 )
+                prop.invalid = True
                 return types.Property(inputs, view=form_view)
 
-            inputs.enum(
-                "task_type",
-                values=["describe", "segment", "extract", "question"],
-                default="describe",
-                label="Analysis Type",
-                description="Choose the type of video analysis to perform",
+            oversized = [
+                (os.path.basename(s.filepath), gv.get_video_size_mb(s.filepath))
+                for _, s in targets
+                if os.path.isfile(s.filepath)
+                and gv.get_video_size_mb(s.filepath) > gv.MAX_UPLOAD_MB
+            ]
+            if oversized:
+                names = ", ".join(f"{n} ({s:.0f}MB)" for n, s in oversized[:3])
+                prop = inputs.str(
+                    "size_error",
+                    view=types.Error(
+                        label=(
+                            f"{len(oversized)} video(s) exceed the "
+                            f"{gv.MAX_UPLOAD_MB}MB limit: {names}"
+                        )
+                    ),
+                )
+                prop.invalid = True
+                return types.Property(inputs, view=form_view)
+
+            large = sum(
+                1
+                for _, s in targets
+                if os.path.isfile(s.filepath)
+                and gv.get_video_size_mb(s.filepath) > gv.INLINE_LIMIT_MB
+            )
+            remote = sum(1 for _, s in targets if not gm.is_ready(s))
+            note = f"{len(targets)} video(s) will be analyzed."
+            if large:
+                note += (
+                    f" {large} exceed {gv.INLINE_LIMIT_MB}MB and will be "
+                    "uploaded via the Files API first."
+                )
+            if remote:
+                note += (
+                    f" {remote} are not cached locally and will be downloaded "
+                    "before analysis."
+                )
+            inputs.str("target_note", view=types.Notice(label=note))
+
+        inputs.int(
+            "max_videos",
+            label="Max videos",
+            default=5,
+            description="A guard against a runaway bill — Gemini charges per video",
+        )
+
+        task_choices = types.Dropdown()
+        for name, task in VIDEO_TASK_ORDER:
+            task_choices.add_choice(
+                name,
+                label=f"{task['label']} — {task['theme']}",
+                description=task["description"],
             )
 
+        alias = ctx.params.get("task_type")
+        if alias in gv.LEGACY_TASK_ALIASES:
+            ctx.params["task_type"] = gv.LEGACY_TASK_ALIASES[alias]
+
+        inputs.enum(
+            "task_type",
+            values=task_choices.values(),
+            default="describe",
+            label="Task",
+            view=task_choices,
+        )
+
+        task_type = ctx.params.get("task_type", "describe")
+        try:
+            task_name, task = gv.resolve_task(task_type)
+        except gv.GeminiVideoError:
+            task_name, task = gv.resolve_task("describe")
+
+        if _is_stale_prompt(ctx.params.get("prompt"), task):
             inputs.str(
-                "prompt",
-                label="Analysis Prompt",
-                required=True,
-                description="Describe what you want to analyze in the video. For questions, include specific timestamps if needed (e.g., 'What happens at 0:30?')",
+                "stale_prompt_warning",
+                view=types.Warning(
+                    label=(
+                        "That prompt is another task's default. Replace it with "
+                        f"what you actually want to {task['label'].lower()}."
+                    )
+                ),
             )
 
-            api_key = ctx.secrets.get("GEMINI_API_KEY")
-            model_choices = list_gemini_models(api_key) if api_key else []
-            default_model = "gemini-3-pro-preview"
-            if model_choices:
-                inputs.enum(
-                    "model",
-                    values=model_choices,
-                    default=default_model if default_model in model_choices else model_choices[0],
-                    label="Model",
-                    description="Select a Gemini model",
-                )
-            else:
-                inputs.str(
-                    "model",
-                    label="Model",
-                    default=default_model,
-                    description="The Gemini model to use (e.g., gemini-3-pro-preview)",
-                )
+        inputs.str(
+            "prompt",
+            label="Prompt",
+            required=task["prompt_required"],
+            default=task["default_prompt"] or None,
+            description=_PROMPT_HELP.get(task_name, "What do you want to know?"),
+        )
 
+        api_key = ctx.secrets.get("GEMINI_API_KEY")
+        model_choices = list_video_models(api_key) if api_key else []
+        if model_choices:
+            inputs.enum(
+                "model",
+                values=model_choices,
+                default=(
+                    gv.DEFAULT_VIDEO_MODEL
+                    if gv.DEFAULT_VIDEO_MODEL in model_choices
+                    else model_choices[0]
+                ),
+                label="Model",
+                description="Models that support agentic video processing",
+            )
+        else:
+            inputs.str(
+                "model",
+                label="Model",
+                default=gv.DEFAULT_VIDEO_MODEL,
+                description="A Gemini model that supports agentic video",
+            )
+
+        inputs.enum(
+            "processing_mode",
+            values=["agentic", "static"],
+            default="agentic",
+            label="Processing mode",
+            description=(
+                "Agentic lets the model navigate the timeline itself; static "
+                "samples frames at a fixed rate"
+            ),
+            view=types.RadioGroup(),
+        )
+
+        if ctx.params.get("processing_mode") == "static":
+            inputs.float(
+                "fps",
+                label="Frames per second",
+                default=1.0,
+                description="1.0 samples one frame per second; 0.5 one every two",
+            )
+            inputs.float(
+                "start_offset",
+                label="Start offset (seconds)",
+                description="Optional — analyze only from this point",
+            )
+            inputs.float(
+                "end_offset",
+                label="End offset (seconds)",
+                description="Optional — analyze only up to this point",
+            )
+        else:
             inputs.enum(
                 "thinking_level",
                 values=["low", "high"],
                 default="high",
-                label="Thinking Level",
-                description="Reasoning depth: 'low' minimizes latency/cost, 'high' maximizes reasoning (Gemini 3.0 only)",
+                label="Thinking level",
+                description=(
+                    "'low' minimizes latency and cost; 'high' maximizes "
+                    "reasoning over the timeline"
+                ),
             )
 
-            inputs.enum(
-                "media_resolution",
-                values=["low", "medium", "high"],
-                default="high",
-                label="Media Resolution",
-                description="Video frame resolution: 'high' (1,120 tokens/frame) for analysis, 'medium' (560) for PDFs, 'low' (70) for efficiency",
+        if task["default_field"]:
+            inputs.str(
+                "label_field",
+                label="Label field",
+                default=task["default_field"],
+                description=(
+                    "Timestamped results are written here as temporal "
+                    "detections, seekable in the App"
+                ),
+            )
+
+        if task_name == "frame_extract":
+            inputs.bool(
+                "extract_frames",
+                label="Cut the selected frames out as images",
+                default=True,
+                description=(
+                    "Writes the chosen frames to disk and adds them to a "
+                    "companion image dataset"
+                ),
             )
 
         return types.Property(inputs, view=form_view)
 
     def execute(self, ctx):
-        if len(ctx.selected) != 1:
-            return {"status": "error", "error": "Please select exactly one video"}
+        api_key = ctx.secrets.get("GEMINI_API_KEY")
+        if not api_key:
+            return {"status": "error", "error": "GEMINI_API_KEY is not set"}
 
-        sample_id = ctx.selected[0]
-        filepath = ctx.dataset[sample_id].filepath
-        prompt = ctx.params.get("prompt")
         task_type = ctx.params.get("task_type", "describe")
-        model = ctx.params.get("model", "gemini-3-pro-preview")
-        thinking_level = ctx.params.get("thinking_level", "high")
-        media_resolution = ctx.params.get("media_resolution", "high")
-
         try:
-            # Check video size
-            video_size_mb = get_video_size_mb(filepath)
-            if video_size_mb > 20:
-                return {
-                    "status": "error",
-                    "error": f"Video is too large ({video_size_mb:.1f}MB). Maximum size is 20MB.",
-                    "prompt": prompt,
-                    "task_type": task_type
-                }
+            task_name, task = gv.resolve_task(task_type)
+        except gv.GeminiVideoError as e:
+            return {"status": "error", "error": str(e)}
 
-            # Analyze video
-            api_key = ctx.secrets.get("GEMINI_API_KEY")
-            result = analyze_video(filepath, prompt, api_key, task_type, model, thinking_level, media_resolution)
-
-            # Store result in sample metadata
-            sample = ctx.dataset[sample_id]
-
-            analysis_entry = {
-                "prompt": prompt,
-                "task_type": task_type,
-                "result": result,
-                "timestamp": datetime.now().isoformat()
-            }
-
-            # Append to existing analysis or create new list
-            if sample.has_field("video_analysis") and sample["video_analysis"] is not None:
-                current_analysis = sample["video_analysis"]
-                if isinstance(current_analysis, list):
-                    current_analysis.append(analysis_entry)
-                else:
-                    current_analysis = [analysis_entry]
-                sample["video_analysis"] = current_analysis
-            else:
-                sample["video_analysis"] = [analysis_entry]
-
-            sample.save()
-
+        kwargs = dict(
+            api_key=api_key,
+            task_type=task_name,
+            model=ctx.params.get("model", gv.DEFAULT_VIDEO_MODEL),
+            processing_mode=ctx.params.get("processing_mode", "agentic"),
+            fps=ctx.params.get("fps"),
+            start_offset=ctx.params.get("start_offset"),
+            end_offset=ctx.params.get("end_offset"),
+            thinking_level=ctx.params.get("thinking_level", "high"),
+        )
+        prompt = ctx.params.get("prompt") or ""
+        if _is_stale_prompt(prompt, task):
             return {
-                "prompt": prompt,
-                "task_type": task_type,
-                "result": result,
-                "status": "success",
-                "video_size_mb": f"{video_size_mb:.2f}"
-            }
-        except Exception as e:
-            return {
-                "prompt": prompt,
-                "task_type": task_type,
                 "status": "error",
-                "error": str(e)
+                "task_type": task_name,
+                "error": (
+                    f"The prompt is another task's default ({prompt!r}). Replace "
+                    f"it with what you want the '{task_name}' task to look for."
+                ),
             }
+
+        label_field = ctx.params.get("label_field") or task["default_field"]
+
+        if ctx.params.get("source") == "youtube":
+            url = (ctx.params.get("youtube_url") or "").strip()
+            if not gv.is_youtube_url(url):
+                return {"status": "error", "error": f"Not a YouTube URL: {url}"}
+
+            try:
+                result = gv.run_interaction(url, prompt, **kwargs)
+            except Exception as e:
+                return {"status": "error", "error": str(e), "task_type": task_name}
+
+            return {
+                "status": "success",
+                "task_type": task_name,
+                "prompt": result["prompt"],
+                "result": _render_result(result),
+                "result_field": None,
+                "processed": 1,
+                "total": 1,
+                "processing_calls": result["processing_calls"],
+                "total_tokens": result["usage"].get("total_tokens"),
+            }
+
+        targets, error = _resolve_video_targets(ctx)
+        if error is not None:
+            return {"status": "error", "error": error, "task_type": task_name}
+
+        rendered = []
+        errors = []
+        processed = 0
+        total_events = 0
+        total_tokens = 0
+        processing_calls = 0
+        frames_summary = None
+        written = {}
+
+        for sample_id, sample in targets:
+            filepath = sample.filepath
+            try:
+                source = gm.localize(sample)
+                result = gv.run_interaction(source, prompt, **kwargs)
+                written = gv.save_result(sample, result, label_field=label_field)
+
+                processed += 1
+                total_events += written["num_events"]
+                processing_calls += result["processing_calls"]
+                total_tokens += result["usage"].get("total_tokens") or 0
+
+                if task_name == "frame_extract" and ctx.params.get(
+                    "extract_frames", True
+                ):
+                    events = (result.get("data") or {}).get("events") or []
+                    frames_summary = gv.extract_frames(sample, events)
+
+                rendered.append(
+                    _render_result(
+                        result,
+                        filename=(
+                            os.path.basename(filepath)
+                            if len(targets) > 1
+                            else None
+                        ),
+                        field=written.get("summary_field"),
+                    )
+                )
+            except Exception as e:
+                errors.append(f"{os.path.basename(filepath)}: {e}")
+
+        body = "\n\n---\n\n".join(rendered)
+        if frames_summary and frames_summary["num_frames"]:
+            body += (
+                f"\n\n---\n\n**Extracted {frames_summary['num_frames']} frames** "
+                f"into dataset `{frames_summary['dataset']}` "
+                f"(`{frames_summary['output_dir']}`)."
+            )
+
+        return {
+            "status": "success" if processed else "error",
+            "task_type": task_name,
+            "prompt": prompt or task["default_prompt"],
+            "result": body,
+            "processed": processed,
+            "total": len(targets),
+            "num_events": total_events,
+            "result_field": written.get("summary_field"),
+            "label_field": label_field if total_events else None,
+            "processing_calls": processing_calls,
+            "total_tokens": total_tokens,
+            "frames_dataset": (
+                frames_summary["dataset"] if frames_summary else None
+            ),
+            "error": "\n".join(errors) if errors else None,
+        }
 
     def resolve_output(self, ctx):
         outputs = types.Object()
-        outputs.str("prompt", label="Analysis Prompt")
-        outputs.str("task_type", label="Analysis Type")
+        outputs.str("task_type", label="Task")
         outputs.str("status", label="Status")
-        outputs.str(
-            "result",
-            label="Analysis Result",
-            view=types.MarkdownView(),
+        outputs.str("prompt", label="Prompt")
+        outputs.str("result", label="Result", view=types.MarkdownView())
+        outputs.int("processed", label="Videos analyzed")
+        outputs.int("total", label="Videos requested")
+        outputs.int("num_events", label="Timestamped events")
+        outputs.str("result_field", label="Saved to field")
+        outputs.str("label_field", label="Temporal detections field")
+        outputs.int("processing_calls", label="Agentic video lookups")
+        outputs.int("total_tokens", label="Total tokens")
+        outputs.str("frames_dataset", label="Extracted frames dataset")
+        outputs.str("error", label="Error details")
+        return types.Property(
+            outputs, view=types.View(label="Video Analysis Result")
         )
-        outputs.str("video_size_mb", label="Video Size (MB)")
-        outputs.str("error", label="Error Details")
-        return types.Property(outputs, view=types.View(label="Video Analysis Result"))
+
+
+VIDEO_GEN_TASK_ORDER = [
+    (name, gvg.GENERATION_TASKS[name])
+    for name in (
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "reference_to_video",
+        "edit",
+        "extend",
+    )
+]
+
+_GEN_SELECTION_RULES = {
+    "none": (0, 0),
+    "one_image": (1, 1),
+    "two_images": (2, 2),
+    "images": (1, 3),
+    "generated_video": (1, 1),
+}
+
+_GEN_SELECTION_ASKS = {
+    "one_image": "exactly one image",
+    "two_images": "exactly two images",
+    "images": "one to three images",
+    "generated_video": "exactly one generated clip",
+}
+
+
+def _resolve_generation_sources(ctx, spec):
+    """Validates the selection against a generation task's requirements.
+
+    Returns:
+        an ``(image_paths, interaction_id, error)`` tuple
+    """
+    needs = spec["needs"]
+    low, high = _GEN_SELECTION_RULES[needs]
+    selected = list(ctx.selected)
+
+    if needs == "none":
+        return [], None, None
+
+    asks = _GEN_SELECTION_ASKS[needs]
+
+    if not selected:
+        return [], None, f"Select {asks} to use with '{spec['label']}'."
+
+    if len(selected) < low or len(selected) > high:
+        return [], None, (
+            f"'{spec['label']}' takes {asks} — you have {len(selected)} "
+            "selected. Narrow the selection to run it."
+        )
+
+    try:
+        samples = [ctx.dataset[sample_id] for sample_id in selected]
+    except KeyError:
+        return [], None, (
+            "The selected sample is not in this dataset. Generated clips are "
+            "added to a companion video dataset — switch to it before editing "
+            "or extending one."
+        )
+
+    if needs == "generated_video":
+        sample = samples[0]
+        interaction_id = (
+            sample["gemini_interaction_id"]
+            if sample.has_field("gemini_interaction_id")
+            else None
+        )
+        if not interaction_id:
+            return [], None, (
+                "That sample was not generated by this plugin, so there is no "
+                "clip to edit. Editing an arbitrary uploaded video is not "
+                "supported here."
+            )
+
+        return [], interaction_id, None
+
+    paths = []
+    for sample in samples:
+        if sample.media_type != "image":
+            return [], None, (
+                f"'{os.path.basename(sample.filepath)}' is a "
+                f"{sample.media_type}, and '{spec['label']}' takes {asks}."
+            )
+
+        paths.append(gm.localize(sample))
+
+    return paths, None, None
+
+
+class VideoGeneration(foo.Operator):
+    @property
+    def config(self):
+        _config = foo.OperatorConfig(
+            name="video_generation",
+            label="Gemini: Generate Video",
+            description=(
+                "Generate video with audio using Gemini Omni — from text, from "
+                "an image, or by editing and extending a clip you generated"
+            ),
+            dynamic=True,
+            allow_immediate_execution=True,
+            allow_delegated_execution=True,
+            default_choice_to_delegated=False,
+        )
+        _config.icon = "/assets/icon_video.svg"
+        return _config
+
+    def resolve_placement(self, ctx):
+        return types.Placement(
+            types.Places.SAMPLES_GRID_ACTIONS,
+            types.Button(
+                label="Generate Video",
+                icon="/assets/icon_video.svg",
+                prompt=True,
+            ),
+        )
+
+    def resolve_input(self, ctx):
+        inputs = types.Object()
+        form_view = types.View(
+            label="Gemini Video Generation",
+            description="Omni generates video with a synthesized audio track",
+        )
+
+        if not allows_gemini_models(ctx):
+            inputs.message(
+                "no_gemini_key",
+                label="No Gemini API Key. Please set GEMINI_API_KEY in your environment.",
+            )
+            return types.Property(inputs, view=form_view)
+
+        task_choices = types.Dropdown()
+        for name, spec in VIDEO_GEN_TASK_ORDER:
+            task_choices.add_choice(
+                name, label=spec["label"], description=spec["description"]
+            )
+
+        inputs.enum(
+            "task",
+            values=task_choices.values(),
+            default="text_to_video",
+            label="Task",
+            view=task_choices,
+        )
+
+        task_name = ctx.params.get("task", "text_to_video")
+        try:
+            task_name, spec = gvg.resolve_task(task_name)
+        except gvg.GeminiVideoGenError:
+            task_name, spec = gvg.resolve_task("text_to_video")
+
+        image_paths, interaction_id, error = _resolve_generation_sources(ctx, spec)
+        if error is not None:
+            prop = inputs.str("selection_error", view=types.Warning(label=error))
+            prop.invalid = True
+        elif spec["needs"] != "none":
+            selected = list(ctx.selected)
+            names = ", ".join(
+                os.path.basename(ctx.dataset[i].filepath) for i in selected
+            )
+            inputs.str(
+                "selection_note",
+                view=types.Notice(label=f"Using {len(selected)} selected: {names}"),
+            )
+
+        inputs.str(
+            "prompt",
+            label="Prompt",
+            required=True,
+            description=spec["prompt_help"],
+        )
+
+        inputs.enum(
+            "model",
+            values=gvg.VIDEO_GEN_MODELS,
+            default=gvg.DEFAULT_VIDEO_GEN_MODEL,
+            label="Model",
+            description="Gemini Omni generates video with audio",
+        )
+
+        inputs.enum(
+            "resolution",
+            values=gvg.RESOLUTIONS,
+            default="720p",
+            label="Resolution",
+            description=(
+                "360p renders a draft at roughly a third of 720p's cost; "
+                "1080p and 4k are upscaled"
+            ),
+        )
+
+        inputs.enum(
+            "aspect_ratio",
+            values=gvg.ASPECT_RATIOS,
+            default="16:9",
+            label="Aspect ratio",
+            view=types.RadioGroup(),
+        )
+
+        try:
+            default_dir = gm.media_root(ctx.dataset)
+            dir_error = None
+        except gm.MediaError as e:
+            default_dir = ""
+            dir_error = str(e)
+
+        if dir_error:
+            prop = inputs.str("output_dir_error", view=types.Warning(label=dir_error))
+            prop.invalid = True
+
+        inputs.str(
+            "output_dir",
+            label="Output directory",
+            required=bool(dir_error),
+            default=default_dir or None,
+            description=(
+                "Where the clip is written. Defaults beside the dataset's "
+                "media so everyone can see it; set a cloud location such as "
+                "gs://your-bucket/generated when the media folder is read-only"
+            ),
+        )
+
+        inputs.str(
+            "notice",
+            view=types.Notice(
+                label=(
+                    "Generation takes tens of seconds to a few minutes and "
+                    "adds a new video sample to your dataset."
+                )
+            ),
+        )
+
+        return types.Property(inputs, view=form_view)
+
+    def execute(self, ctx):
+        api_key = ctx.secrets.get("GEMINI_API_KEY")
+        if not api_key:
+            return {"status": "error", "error": "GEMINI_API_KEY is not set"}
+
+        try:
+            task_name, spec = gvg.resolve_task(
+                ctx.params.get("task", "text_to_video")
+            )
+        except gvg.GeminiVideoGenError as e:
+            return {"status": "error", "error": str(e)}
+
+        image_paths, interaction_id, error = _resolve_generation_sources(ctx, spec)
+        if error is not None:
+            return {"status": "error", "task": task_name, "error": error}
+
+        selected = list(ctx.selected)
+
+        try:
+            result = gvg.generate_video(
+                ctx.params.get("prompt"),
+                api_key,
+                task=task_name,
+                model=ctx.params.get("model", gvg.DEFAULT_VIDEO_GEN_MODEL),
+                image_paths=image_paths,
+                previous_interaction_id=interaction_id,
+                aspect_ratio=ctx.params.get("aspect_ratio", "16:9"),
+                resolution=ctx.params.get("resolution", "720p"),
+            )
+            saved = gvg.save_video(
+                ctx.dataset,
+                result,
+                output_dir=ctx.params.get("output_dir") or None,
+                source_ids=selected or None,
+            )
+        except Exception as e:
+            return {"status": "error", "task": task_name, "error": str(e)}
+
+        ctx.trigger("reload_dataset")
+
+        return {
+            "status": "success",
+            "task": task_name,
+            "prompt": result["prompt"],
+            "filepath": saved["filepath"],
+            "dataset": saved["dataset"],
+            "sample_id": saved["sample_id"],
+            "duration": (
+                f"{saved['duration']:.1f}s" if saved["duration"] else None
+            ),
+            "resolution": result["resolution"],
+            "total_tokens": result["usage"].get("total_tokens"),
+            "interaction_id": result["interaction_id"],
+        }
+
+    def resolve_output(self, ctx):
+        outputs = types.Object()
+        outputs.str("task", label="Task")
+        outputs.str("status", label="Status")
+        outputs.str("prompt", label="Prompt")
+        outputs.str("filepath", label="Generated video")
+        outputs.str("dataset", label="Added to dataset")
+        outputs.str("duration", label="Duration")
+        outputs.str("resolution", label="Resolution")
+        outputs.int("total_tokens", label="Total tokens")
+        outputs.str("interaction_id", label="Interaction id (edit and extend)")
+        outputs.str("error", label="Error details")
+        return types.Property(
+            outputs, view=types.View(label="Video Generation Result")
+        )
 
 
 def register(plugin):
@@ -1316,6 +1876,7 @@ def register(plugin):
     plugin.register(ImageEditing)
     plugin.register(MultiImageComposition)
     plugin.register(VideoUnderstanding)
+    plugin.register(VideoGeneration)
 
 def download_model(model_name, model_path):
     """Prepare remote HTTP model; create a marker file at model_path."""
